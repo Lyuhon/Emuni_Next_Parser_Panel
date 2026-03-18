@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "EMU парсер",
-  description: "Админка парсера",
+  description: "Админка для упарвления",
 };
 
 export default function RootLayout({
