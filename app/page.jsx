@@ -28,7 +28,13 @@ async function apiFetch(path, options = {}) {
 
 function fmtDate(s) {
   if (!s) return '—';
-  return new Date(s).toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const d = new Date(s);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${min}, ${dd}.${mm}.${yyyy}`;
 }
 function fmtDateShort(s) {
   if (!s) return '—';
@@ -217,7 +223,7 @@ function TgPhotoGallery({ originalUrl, photos, onChange }) {
 function SiteImageReplace({ originalUrl, siteUrl, onChange }) {
   const inputRef = useRef(null);
   const [error, setError] = useState('');
-  const activeUrl = siteUrl || originalUrl;
+  const activeUrl = (typeof siteUrl === 'string' ? siteUrl : siteUrl?.url) || originalUrl;
 
   const handleFile = (e) => {
     const file = e.target.files?.[0]; e.target.value = '';
@@ -237,7 +243,7 @@ function SiteImageReplace({ originalUrl, siteUrl, onChange }) {
           <button onClick={() => inputRef.current?.click()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-[12px] font-medium text-gray-800 shadow hover:bg-gray-50 cursor-pointer">
             <Pencil className="w-3.5 h-3.5" />Заменить
           </button>
-          {siteUrl && siteUrl !== originalUrl && (
+          {activeUrl && activeUrl !== originalUrl && (
             <button onClick={() => { onChange(null); setError(''); }} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500 text-white text-[12px] font-medium shadow hover:bg-red-600 cursor-pointer">
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -250,7 +256,7 @@ function SiteImageReplace({ originalUrl, siteUrl, onChange }) {
         className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-dashed border-gray-300 bg-gray-50 hover:bg-gray-100 hover:border-gray-400 text-[13px] text-gray-500 font-medium transition-all cursor-pointer">
         <Pencil className="w-3.5 h-3.5" />Заменить фото для сайта
       </button>
-      {siteUrl && siteUrl !== originalUrl && (
+      {activeUrl && activeUrl !== originalUrl && (
         <div className="flex items-center justify-between">
           <p className="text-[12px] text-emerald-600 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" />Фото заменено</p>
           <button onClick={() => { onChange(null); setError(''); }} className="text-[12px] text-gray-400 hover:text-gray-600 transition-colors cursor-pointer">← Вернуть оригинал</button>
@@ -268,30 +274,46 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
   const [activeContentTab, setActiveContentTab] = useState('site');
   const [acting, setActing] = useState(false);
   const [savingImages, setSavingImages] = useState(false);
+  const [titlesExpanded, setTitlesExpanded] = useState(false);
 
-  // Инициализируем фото из данных поста
-  const [tgPhotos, setTgPhotos] = useState(() => {
-    if (!post) return [];
-    if (post.tg_images?.length) return post.tg_images.map((url, i) => ({ id: i, url, isOriginal: false }));
-    return post.image_url ? [{ id: 0, url: post.image_url, isOriginal: true }] : [];
-  });
-  const [siteImage, setSiteImage] = useState(() => post?.site_image_url || null);
+  const [tgPhotos, setTgPhotos] = useState([]);
+  const [siteImage, setSiteImage] = useState(null);
+
+  // Синхронизация state при смене поста или после сохранения
+  useEffect(() => {
+    if (!post) return;
+    if (post.tg_images?.length) {
+      setTgPhotos(post.tg_images.map((url, i) => ({ id: `orig-${i}`, url, isOriginal: false, persisted: true })));
+    } else if (post.image_url) {
+      setTgPhotos([{ id: 'orig-main', url: post.image_url, isOriginal: true, persisted: true }]);
+    } else {
+      setTgPhotos([]);
+    }
+    setSiteImage(post.site_image_url ? { url: post.site_image_url, persisted: true } : null);
+    setTitlesExpanded(false);
+  }, [post?.id, post?.tg_images, post?.image_url, post?.site_image_url]);
 
   if (!post) return null;
 
-  // Проверяем есть ли несохранённые изменения
-  const origTgUrls = post.tg_images?.length ? post.tg_images : (post.image_url ? [post.image_url] : []);
-  const currTgUrls = tgPhotos.map(p => p.url);
-  const imagesDirty = JSON.stringify(currTgUrls) !== JSON.stringify(origTgUrls) || siteImage !== (post.site_image_url || null);
+  const hasNewTgFiles = tgPhotos.some(p => p.file);
+  const hasNewSiteFile = !!siteImage?.file;
+  const tgWasReset = (post.tg_images?.length || 0) > 0 && tgPhotos.length === 0;
+  const siteWasReset = !!post.site_image_url && !siteImage;
+  const imagesDirty = hasNewTgFiles || hasNewSiteFile || tgWasReset || siteWasReset;
 
   const handleSaveImages = async () => {
     setSavingImages(true);
     try {
       const form = new FormData();
-      tgPhotos
-        .filter(p => !p.isOriginal && p.file)
-        .slice(0, 4)
-        .forEach(p => form.append('tg_images', p.file));
+
+      // По порядку: каждое фото — либо новый файл, либо существующий URL
+      tgPhotos.slice(0, 4).forEach(p => {
+        if (p.file) {
+          form.append('tg_images', p.file);
+        } else if (p.url) {
+          form.append('tg_existing_urls', p.url);
+        }
+      });
 
       if (siteImage?.file) {
         form.append('site_image', siteImage.file);
@@ -299,7 +321,7 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
 
       const res = await fetch(`${API}/api/posts/${post.id}/images`, {
         method: 'POST',
-        body: form, // без Content-Type — браузер сам поставит boundary
+        body: form,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await onRefresh();
@@ -324,10 +346,19 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+      onClick={onClose}
+    >
       {confirmAction && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-sm p-6 space-y-4">
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm"
+          onClick={() => !acting && setConfirmAction(null)}
+        >
+          <div
+            className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-sm p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center gap-3">
               <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${confirmAction.status === 'approved' ? 'bg-emerald-50' : 'bg-red-50'}`}>
                 {confirmAction.status === 'approved' ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <XCircle className="w-4 h-4 text-red-500" />}
@@ -350,7 +381,10 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
         </div>
       )}
 
-      <div className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
+      <div
+        className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-3xl max-h-[92vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <h3 className="text-[15px] font-semibold text-gray-900">Пост #{post.id}</h3>
           <button onClick={onClose} className="p-1 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all cursor-pointer"><X className="w-4 h-4" /></button>
@@ -370,15 +404,27 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
             <div className="p-4">
               {activeContentTab === 'site' ? (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    {[['RU', post.title_ru], ['UZ', post.title_uz], ['EN', post.title_en]].map(([lang, val]) => (
-                      <div key={lang} className="space-y-1">
-                        <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Заголовок ({lang})</p>
-                        <p className="text-[14px] text-gray-900 font-medium leading-snug">{val}</p>
+                  <div>
+                    <div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {[['RU', post.title_ru], ['UZ', post.title_uz], ['EN', post.title_en]].map(([lang, val]) => (
+                          <div key={lang} className="space-y-1">
+                            <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Заголовок ({lang})</p>
+                            <p className={`text-[14px] text-gray-900 font-medium leading-snug ${titlesExpanded ? '' : 'line-clamp-2'}`}>{val}</p>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                      {[post.title_ru, post.title_uz, post.title_en].some(t => (t || '').length > 10) && (
+                        <button
+                          onClick={() => setTitlesExpanded(v => !v)}
+                          className="border-1 px-2 rounded-md mt-2 text-[12px] text-gray-500 hover:text-gray-700 font-medium transition-colors cursor-pointer"
+                        >
+                          {titlesExpanded ? 'Свернуть ↑' : 'Читать больше ↓'}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className={`grid grid-cols-1 sm:grid-cols-3 gap-4 overflow-hidden transition-all duration-300 ${titlesExpanded ? '' : 'max-h-24'}`}>
                     {[['RU', post.content_ru], ['UZ', post.content_uz], ['EN', post.content_en]].map(([lang, val]) => (
                       <div key={lang} className="space-y-1">
                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Текст ({lang})</p>
@@ -616,17 +662,16 @@ export default function AdminPanel() {
       )}
 
       {actionConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-sm p-6 space-y-4">
-            <div className="flex items-center gap-3">
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${actionConfirm.status === 'approved' ? 'bg-emerald-50' : 'bg-red-50'}`}>
-                {actionConfirm.status === 'approved' ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <XCircle className="w-4 h-4 text-red-500" />}
-              </div>
-              <div>
-                <h3 className="text-[15px] font-semibold text-gray-900">{actionConfirm.status === 'approved' ? 'Опубликовать пост?' : 'Отклонить пост?'}</h3>
-                <p className="text-[12px] text-gray-400 mt-0.5">{actionConfirm.channel === 'telegram' ? 'Telegram' : 'Сайт'}</p>
-              </div>
+        <div onClick={() => setActionConfirm(null)} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div onClick={(e) => e.stopPropagation()} className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-sm p-6 space-y-4"><div className="flex items-center gap-3">
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${actionConfirm.status === 'approved' ? 'bg-emerald-50' : 'bg-red-50'}`}>
+              {actionConfirm.status === 'approved' ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <XCircle className="w-4 h-4 text-red-500" />}
             </div>
+            <div>
+              <h3 className="text-[15px] font-semibold text-gray-900">{actionConfirm.status === 'approved' ? 'Опубликовать пост?' : 'Отклонить пост?'}</h3>
+              <p className="text-[12px] text-gray-400 mt-0.5">{actionConfirm.channel === 'telegram' ? 'Telegram' : 'Сайт'}</p>
+            </div>
+          </div>
             <p className="text-[13px] text-gray-600 line-clamp-2">«{actionConfirm.postTitle}»</p>
             <div className="flex gap-2">
               <button onClick={() => setActionConfirm(null)} className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 text-[14px] font-medium text-gray-600 hover:bg-gray-50 transition-all cursor-pointer">Отмена</button>
@@ -636,7 +681,13 @@ export default function AdminPanel() {
         </div>
       )}
 
-      <PostModal post={syncedSelected} onClose={() => setSelectedPost(null)} onAction={handleAction} onRefresh={loadPosts} />
+      <PostModal
+        key={syncedSelected?.id ?? 'none'}
+        post={syncedSelected}
+        onClose={() => setSelectedPost(null)}
+        onAction={handleAction}
+        onRefresh={loadPosts}
+      />
 
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
