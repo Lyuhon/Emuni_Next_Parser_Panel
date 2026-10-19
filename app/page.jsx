@@ -321,7 +321,7 @@ function StatusModal({ onClose, onResult }) {
           {overall && !loading && (
             <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium ${overall.wrap}`}>
               <overall.icon className="w-4 h-4" />
-              {data.overall === 'ok' ? 'Всё работает' : data.overall === 'warn' ? 'Есть замечания' : 'Есть проблемы — смотрите ниже'}
+              {data.overall === 'ok' ? 'Всё работает' : data.overall === 'warn' ? 'Есть замечания' : 'Есть проблемы'}
             </div>
           )}
           {error && <div className="px-3 py-2 rounded-lg bg-red-50 text-red-600 text-[13px]">Не удалось проверить: {error}</div>}
@@ -420,7 +420,7 @@ function LogsView() {
           <select value={level} onChange={e => setLevel(e.target.value)} className={sel}>
             <option value="all">Все записи</option><option value="warning">Предупреждения и ошибки</option><option value="error">Только ошибки</option>
           </select>
-          <label className="inline-flex items-center gap-1.5 text-[13px] text-gray-500 cursor-pointer select-none"><input type="checkbox" checked={access} onChange={e => setAccess(e.target.checked)} />Запросы API</label>
+          <label className="inline-flex items-center gap-1.5 text-[13px] text-gray-500 cursor-pointer select-none"><input type="checkbox" checked={access} onChange={e => setAccess(e.target.checked)} />Служебные строки</label>
           <label className="inline-flex items-center gap-1.5 text-[13px] text-gray-500 cursor-pointer select-none"><input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)} />Автообновление</label>
           <button onClick={() => load()} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 disabled:opacity-50 transition-all cursor-pointer">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Обновить
@@ -435,7 +435,6 @@ function LogsView() {
           : lines.length === 0 ? <p className="text-gray-500">{loading ? 'Загрузка…' : 'Записей нет'}</p>
           : lines.map((l, i) => <div key={i} className={`whitespace-pre-wrap break-words ${LEVEL_COLOR[l.level] || 'text-gray-300'}`}>{l.text}</div>)}
       </div>
-      <div className="px-5 py-2 border-t border-gray-100 text-[12px] text-gray-400">Последние {lines.length} записей · секреты скрыты · {auto ? 'обновляется каждые 5 с' : 'автообновление выключено'}</div>
     </div>
   );
 }
