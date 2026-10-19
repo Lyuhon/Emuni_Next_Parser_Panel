@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { Instagram, Loader2, Lock, User } from 'lucide-react';
+import { Loader2, Lock, User } from 'lucide-react';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -39,9 +39,8 @@ export default function LoginPage() {
       style={{ fontFamily: "'Geist', 'Inter', system-ui, sans-serif" }}>
       <form onSubmit={onSubmit} className="w-full max-w-sm bg-white rounded-2xl border border-gray-200 shadow-sm p-7 space-y-5">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gray-900 flex items-center justify-center">
-            <Instagram className="w-4 h-4 text-white" />
-          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/emu-logo.png" alt="EMU" className="w-11 h-11 object-contain" />
           <div>
             <h1 className="text-[16px] font-semibold text-gray-900 leading-tight">EMU Парсер</h1>
             <p className="text-[12px] text-gray-400">Вход в панель управления</p>

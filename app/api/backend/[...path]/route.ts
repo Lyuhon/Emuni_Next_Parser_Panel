@@ -19,6 +19,8 @@ const ROUTES: [RegExp, string[]][] = [
   [/^admins\/\d+$/, ['DELETE']],
   [/^parse-now$/, ['POST']],
   [/^parse-status$/, ['GET']],
+  [/^health-check$/, ['GET']],
+  [/^logs$/, ['GET']],
 ];
 
 const json = (detail: string, status: number) => NextResponse.json({ detail }, { status });

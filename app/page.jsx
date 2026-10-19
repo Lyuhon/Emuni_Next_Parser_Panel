@@ -8,7 +8,7 @@ import {
   Clock, ExternalLink, ArrowUpRight,
   Menu, X, RefreshCw, ImageIcon, Globe, Send, Trash2,
   MoreHorizontal, FileText, CheckCheck, BanIcon, UserMinus,
-  User, Plus, Loader2, Zap, ImagePlus, Pencil, AlertTriangle, LogOut
+  User, Plus, Loader2, Zap, ImagePlus, Pencil, AlertTriangle, LogOut, Activity, ScrollText
 } from 'lucide-react';
 
 // Все запросы идут на свой же origin: серверный прокси (app/api/backend) проверяет сессию
@@ -165,21 +165,68 @@ function Tooltip({ text, children }) {
   );
 }
 
-// ─── Parse Overlay ────────────────────────────────────────────────────────────
+// ─── Lightbox: фото во весь размер ────────────────────────────────────────────
+
+function Lightbox({ images, index, onClose }) {
+  const [i, setI] = useState(index);
+  const many = images.length > 1;
+  const prev = useCallback(() => setI(v => (v - 1 + images.length) % images.length), [images.length]);
+  const next = useCallback(() => setI(v => (v + 1) % images.length), [images.length]);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+      if (many && e.key === 'ArrowLeft') prev();
+      if (many && e.key === 'ArrowRight') next();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose, many, prev, next]);
+
+  return (
+    <div className="fixed inset-0 z-[300] bg-black/90 flex items-center justify-center p-4 sm:p-8 animate-[fadeIn_150ms_ease-out]" onClick={onClose} role="dialog" aria-modal="true" aria-label="Просмотр фото">
+      <button onClick={onClose} aria-label="Закрыть" className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"><X className="w-5 h-5" /></button>
+      {many && <button onClick={(e) => { e.stopPropagation(); prev(); }} aria-label="Предыдущее" className="absolute left-3 sm:left-6 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"><ChevronLeft className="w-6 h-6" /></button>}
+      {many && <button onClick={(e) => { e.stopPropagation(); next(); }} aria-label="Следующее" className="absolute right-3 sm:right-6 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"><ChevronRight className="w-6 h-6" /></button>}
+      <img src={images[i]} alt="" onClick={(e) => e.stopPropagation()} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-3 text-[12px] text-white/80" onClick={(e) => e.stopPropagation()}>
+        {many && <span>{i + 1} / {images.length}</span>}
+        <a href={images[i]} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/20 transition-colors"><ExternalLink className="w-3 h-3" />Открыть оригинал</a>
+      </div>
+    </div>
+  );
+}
+
+// ─── Parse Overlay: прогресс-бар в процентах ─────────────────────────────────
 
 const RESULT_TEXT = {
   nothing: 'Новых постов нет',
-  quota: 'OpenAI: закончились кредиты. Пополните баланс — перевод повторится автоматически.',
+  quota: 'OpenAI: закончились кредиты. Пополните баланс — парсинг продолжится автоматически.',
 };
 
 function ParseOverlay({ onDone }) {
   const [status, setStatus] = useState('running');
-  const [msg, setMsg] = useState('Запрашиваем Instagram через Apify…');
+  const [msg, setMsg] = useState('');
+  const [pct, setPct] = useState(2);
+  const [canHide, setCanHide] = useState(false);
+  const serverPct = useRef(2);
 
   useEffect(() => {
     let cancelled = false;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const finish = (st, text, delay) => { if (cancelled) return; setStatus(st); setMsg(text); setTimeout(onDone, delay); };
+    const hideTimer = setTimeout(() => setCanHide(true), 15000);
+    // Бар ползёт плавно: догоняет значение сервера и чуть «дышит» вперёд в пределах этапа
+    const tick = setInterval(() => setPct((p) => {
+      const s = serverPct.current;
+      const cap = s < 8 ? 8 : s < 55 ? 52 : Math.min(98, s + 6);
+      if (p < s) return Math.min(s, p + Math.max(1, (s - p) * 0.25));
+      return Math.min(cap, p + 0.15);
+    }), 300);
+
+    const finish = (st, text, delay) => {
+      if (cancelled) return;
+      if (st === 'done') setPct(100);
+      setStatus(st); setMsg(text); setTimeout(onDone, delay);
+    };
 
     (async () => {
       try {
@@ -188,26 +235,27 @@ function ParseOverlay({ onDone }) {
         catch (e) { if (!/уже выполняется/.test(e.message)) throw e; }   // уже идёт — просто ждём
 
         const t0 = Date.now();
-        while (!cancelled && Date.now() - t0 < 5 * 60 * 1000) {
-          await sleep(2000);
+        while (!cancelled && Date.now() - t0 < 12 * 60 * 1000) {
+          await sleep(1500);
           const st = await apiFetch('/parse-status');
-          const elapsed = Date.now() - t0;
-          setMsg(elapsed < 8000 ? 'Ищем новые посты…' : elapsed < 20000 ? 'Переводим через OpenAI…' : 'Сохраняем и отправляем уведомления…');
+          if (typeof st.progress === 'number') serverPct.current = Math.max(serverPct.current, st.progress);
           if (!st.running && st.last_run && st.last_run !== before.last_run) {
             if (st.last_result === 'ok') return finish('done', `Добавлено постов: ${st.last_created}`, 1500);
             if (st.last_result === 'nothing') return finish('done', RESULT_TEXT.nothing, 1500);
-            if (st.last_result === 'quota') return finish('error', RESULT_TEXT.quota, 4500);
-            return finish('error', st.last_error || 'Ошибка парсинга', 3500);
+            if (st.last_result === 'quota') return finish('error', RESULT_TEXT.quota, 5000);
+            return finish('error', st.last_error || 'Ошибка парсинга', 4500);
           }
         }
-        finish('error', 'Парсинг идёт дольше обычного — проверьте позже', 3000);
+        finish('error', 'Парсинг идёт слишком долго — проверьте логи', 4000);
       } catch (e) {
-        finish('error', 'Ошибка: ' + e.message, 3000);
+        finish('error', 'Ошибка: ' + e.message, 3500);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; clearTimeout(hideTimer); clearInterval(tick); };
   }, []);
 
+  const shown = Math.round(Math.min(100, pct));
+  const color = status === 'error' ? 'bg-red-500' : status === 'done' ? 'bg-emerald-500' : 'bg-gray-900';
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div className="bg-white rounded-2xl border border-gray-200 shadow-2xl p-8 w-full max-w-sm mx-4 text-center space-y-5">
@@ -216,12 +264,178 @@ function ParseOverlay({ onDone }) {
           {status === 'done' && <CheckCircle2 className="w-7 h-7 text-emerald-500" />}
           {status === 'error' && <XCircle className="w-7 h-7 text-red-500" />}
         </div>
+        <p className="text-[15px] font-semibold text-gray-900">{status === 'running' ? 'Парсинг запущен' : status === 'done' ? 'Готово' : 'Ошибка'}</p>
         <div>
-          <p className="text-[15px] font-semibold text-gray-900 mb-1">{status === 'running' ? 'Парсинг запущен' : status === 'done' ? 'Готово' : 'Ошибка'}</p>
-          <p className="text-[13px] text-gray-500">{msg}</p>
+          <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden" role="progressbar" aria-valuenow={shown} aria-valuemin={0} aria-valuemax={100}>
+            <div className={`h-full rounded-full transition-[width] duration-500 ease-out ${color}`} style={{ width: `${shown}%` }} />
+          </div>
+          <p className="text-[13px] font-medium text-gray-500 mt-2 tabular-nums">{shown}%</p>
         </div>
-        {status === 'running' && <div className="w-full bg-gray-100 rounded-full h-1 overflow-hidden"><div className="h-full bg-gray-400 rounded-full animate-pulse" style={{ width: '60%' }} /></div>}
+        {msg && <p className="text-[13px] text-gray-500">{msg}</p>}
+        {status === 'running' && canHide && (
+          <button onClick={onDone} className="text-[12px] text-gray-400 hover:text-gray-600 transition-colors cursor-pointer">Свернуть (парсинг продолжится в фоне)</button>
+        )}
       </div>
+    </div>
+  );
+}
+
+// ─── Проверка состояния системы ──────────────────────────────────────────────
+
+const HEALTH_STYLE = {
+  ok:    { icon: CheckCircle2, wrap: 'bg-emerald-50 text-emerald-600', label: 'В порядке' },
+  warn:  { icon: AlertTriangle, wrap: 'bg-amber-50 text-amber-600',   label: 'Внимание' },
+  error: { icon: XCircle,       wrap: 'bg-red-50 text-red-600',       label: 'Проблема' },
+};
+
+function StatusModal({ onClose, onResult }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const run = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const res = await apiFetch('/health-check');
+      setData(res); onResult?.(res.overall);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, [onResult]);
+
+  useEffect(() => { run(); }, [run]);
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const overall = data ? HEALTH_STYLE[data.overall] : null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Состояние системы">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h3 className="text-[15px] font-semibold text-gray-900">Состояние системы</h3>
+          <button onClick={onClose} aria-label="Закрыть" className="p-1 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all cursor-pointer"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-6 space-y-3">
+          {overall && !loading && (
+            <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium ${overall.wrap}`}>
+              <overall.icon className="w-4 h-4" />
+              {data.overall === 'ok' ? 'Всё работает' : data.overall === 'warn' ? 'Есть замечания' : 'Есть проблемы — смотрите ниже'}
+            </div>
+          )}
+          {error && <div className="px-3 py-2 rounded-lg bg-red-50 text-red-600 text-[13px]">Не удалось проверить: {error}</div>}
+          {loading && !data && <div className="py-8 text-center"><Loader2 className="w-6 h-6 text-gray-300 mx-auto animate-spin" /><p className="text-[13px] text-gray-400 mt-2">Проверяем бэкенд, Apify, OpenAI, Telegram и сайт…</p></div>}
+          <div className={`space-y-2 transition-opacity ${loading && data ? 'opacity-50' : ''}`}>
+            {data?.checks.map((c) => {
+              const st = HEALTH_STYLE[c.status];
+              return (
+                <div key={c.id} className="flex gap-3 p-3 rounded-xl border border-gray-100">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${st.wrap}`}><st.icon className="w-4 h-4" /></div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[14px] font-medium text-gray-900">{c.name}</p>
+                      <span className="text-[11px] text-gray-400 tabular-nums">{c.ms} мс</span>
+                    </div>
+                    <p className="text-[13px] text-gray-500 leading-snug break-words">{c.message}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex items-center justify-between pt-1">
+            <p className="text-[11px] text-gray-400">{data ? `Проверено: ${fmtDate(data.checked_at)}` : ''}</p>
+            <button onClick={run} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 disabled:opacity-50 transition-all cursor-pointer">
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Проверить ещё раз
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Логи ────────────────────────────────────────────────────────────────────
+
+const LEVEL_COLOR = { error: 'text-red-400', warning: 'text-amber-300', info: 'text-gray-300' };
+
+function LogsView() {
+  const [lines, setLines] = useState([]);
+  const [available, setAvailable] = useState(true);
+  const [level, setLevel] = useState('all');
+  const [q, setQ] = useState('');
+  const [dq, setDq] = useState('');
+  const [access, setAccess] = useState(false);
+  const [auto, setAuto] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const boxRef = useRef(null);
+  const stick = useRef(true);
+  const reqRef = useRef(0);
+
+  useEffect(() => { const t = setTimeout(() => setDq(q.trim()), 400); return () => clearTimeout(t); }, [q]);
+
+  const load = useCallback(async (silent = false) => {
+    const id = ++reqRef.current;
+    if (!silent) setLoading(true);
+    try {
+      const params = new URLSearchParams({ lines: '400', level });
+      if (dq) params.set('q', dq);
+      if (access) params.set('access', 'true');
+      const res = await apiFetch(`/logs?${params}`);
+      if (id !== reqRef.current) return;
+      setLines(res.lines); setAvailable(res.available !== false); setError('');
+    } catch (e) { if (id === reqRef.current) setError(e.message); }
+    finally { if (id === reqRef.current) setLoading(false); }
+  }, [level, dq, access]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!auto) return;
+    const iv = setInterval(() => { if (document.visibilityState === 'visible') load(true); }, 5000);
+    return () => clearInterval(iv);
+  }, [auto, load]);
+
+  // держимся внизу, пока пользователь сам не прокрутил вверх
+  useEffect(() => {
+    const el = boxRef.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [lines]);
+
+  const copyAll = async () => {
+    try { await navigator.clipboard.writeText(lines.map(l => l.text).join('\n')); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* буфер недоступен */ }
+  };
+
+  const sel = "text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none cursor-pointer";
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="px-4 sm:px-5 py-3 border-b border-gray-100 flex flex-col lg:flex-row gap-2 lg:items-center">
+        <div className="relative flex-1 lg:max-w-xs">
+          <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Поиск по логам…"
+            className="w-full pl-[30px] pr-3 py-2 text-[13px] border border-gray-200 rounded-lg bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-900/8 focus:border-gray-300 focus:bg-white transition-all" />
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <select value={level} onChange={e => setLevel(e.target.value)} className={sel}>
+            <option value="all">Все записи</option><option value="warning">Предупреждения и ошибки</option><option value="error">Только ошибки</option>
+          </select>
+          <label className="inline-flex items-center gap-1.5 text-[13px] text-gray-500 cursor-pointer select-none"><input type="checkbox" checked={access} onChange={e => setAccess(e.target.checked)} />Запросы API</label>
+          <label className="inline-flex items-center gap-1.5 text-[13px] text-gray-500 cursor-pointer select-none"><input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)} />Автообновление</label>
+          <button onClick={() => load()} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 disabled:opacity-50 transition-all cursor-pointer">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Обновить
+          </button>
+          <button onClick={copyAll} className="px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 transition-all cursor-pointer">{copied ? 'Скопировано' : 'Копировать'}</button>
+        </div>
+      </div>
+      {error && <div className="px-5 py-3 bg-red-50 border-b border-red-100 text-[13px] text-red-600">{error}</div>}
+      <div ref={boxRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
+        className="bg-gray-950 text-[12px] leading-relaxed font-mono p-4 h-[65vh] overflow-auto">
+        {!available ? <p className="text-gray-400">Файл логов недоступен на сервере.</p>
+          : lines.length === 0 ? <p className="text-gray-500">{loading ? 'Загрузка…' : 'Записей нет'}</p>
+          : lines.map((l, i) => <div key={i} className={`whitespace-pre-wrap break-words ${LEVEL_COLOR[l.level] || 'text-gray-300'}`}>{l.text}</div>)}
+      </div>
+      <div className="px-5 py-2 border-t border-gray-100 text-[12px] text-gray-400">Последние {lines.length} записей · секреты скрыты · {auto ? 'обновляется каждые 5 с' : 'автообновление выключено'}</div>
     </div>
   );
 }
@@ -664,6 +878,9 @@ export default function AdminPanel() {
   const [newAdminChatId, setNewAdminChatId] = useState('');
   const [error, setError] = useState('');
   const [parsing, setParsing] = useState(false);
+  const [lightbox, setLightbox] = useState(null);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const [health, setHealth] = useState(null);
   const reqId = useRef(0);
   const listTopRef = useRef(null);
 
@@ -733,6 +950,12 @@ export default function AdminPanel() {
     return () => clearInterval(iv);
   }, [loadStats, loadPosts, loadPending]);
 
+  const openPhoto = (post) => {
+    if (!post.image_url) return;
+    const images = post.tg_images?.length ? post.tg_images : [post.image_url];
+    setLightbox({ images, index: 0 });
+  };
+
   const goToPage = (p) => {
     setPage(p);
     listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -797,10 +1020,11 @@ export default function AdminPanel() {
   const tabs = [
     { id: 'dashboard', label: 'Обзор', icon: LayoutDashboard },
     { id: 'posts', label: 'Посты', icon: Instagram },
+    { id: 'logs', label: 'Логи', icon: ScrollText },
     { id: 'settings', label: 'Настройки', icon: Settings },
   ];
-  const tabTitle = { dashboard: 'Обзор', posts: 'Посты', settings: 'Настройки' }[activeTab];
-  const tabSub = { dashboard: 'Общая статистика', posts: `${data.total} записей`, settings: 'Конфигурация' }[activeTab];
+  const tabTitle = { dashboard: 'Обзор', posts: 'Посты', logs: 'Логи', settings: 'Настройки' }[activeTab];
+  const tabSub = { dashboard: 'Общая статистика', posts: `${data.total} записей`, logs: 'Что происходит на сервере', settings: 'Конфигурация' }[activeTab];
 
   const SidebarNav = () => (
     <>
@@ -821,6 +1045,8 @@ export default function AdminPanel() {
   return (
     <div className="min-h-screen bg-[#FAFAFA]" style={{ fontFamily: "'Geist', 'Inter', system-ui, sans-serif" }}>
       {parsing && <ParseOverlay onDone={handleParseDone} />}
+      {lightbox && <Lightbox images={lightbox.images} index={lightbox.index} onClose={() => setLightbox(null)} />}
+      {statusOpen && <StatusModal onClose={() => setStatusOpen(false)} onResult={setHealth} />}
 
       {toast && (
         <div className={`fixed bottom-4 right-4 z-[100] flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-lg text-[14px] font-medium ${toast.type === 'success' ? 'bg-gray-900 text-white' : 'bg-red-600 text-white'}`}>
@@ -862,7 +1088,7 @@ export default function AdminPanel() {
           <div className="absolute left-0 top-0 h-full w-[240px] bg-white border-r border-gray-200 flex flex-col z-50">
             <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-lg bg-gray-900 flex items-center justify-center shrink-0"><Instagram className="w-3.5 h-3.5 text-white" /></div>
+                <img src="/emu-logo.png" alt="EMU" className="w-8 h-8 object-contain shrink-0" />
                 <div><p className="text-[14px] font-semibold text-gray-900 leading-tight">EMU Парсер</p><p className="text-[11px] text-gray-400">Панель управления</p></div>
               </div>
               <button onClick={() => setSidebarOpen(false)} className="p-1 rounded-md text-gray-400 hover:text-gray-600 cursor-pointer"><X className="w-4 h-4" /></button>
@@ -875,7 +1101,7 @@ export default function AdminPanel() {
       <div className="hidden lg:flex fixed left-0 top-0 h-full w-[220px] bg-white border-r border-gray-200 flex-col z-10">
         <div className="px-5 py-4 border-b border-gray-100">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-gray-900 flex items-center justify-center shrink-0"><Instagram className="w-3.5 h-3.5 text-white" /></div>
+            <img src="/emu-logo.png" alt="EMU" className="w-8 h-8 object-contain shrink-0" />
             <div><p className="text-[14px] font-semibold text-gray-900 leading-tight">EMU Парсер</p><p className="text-[11px] text-gray-400">Панель управления</p></div>
           </div>
         </div>
@@ -901,6 +1127,12 @@ export default function AdminPanel() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button onClick={() => setStatusOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300 transition-all cursor-pointer" aria-label="Проверить состояние системы">
+              <span className="relative"><Activity className="w-3.5 h-3.5" />
+                {health && <span className={`absolute -top-1 -right-1 w-2 h-2 rounded-full ring-2 ring-white ${health === 'ok' ? 'bg-emerald-500' : health === 'warn' ? 'bg-amber-500' : 'bg-red-500'}`} />}
+              </span>
+              <span className="hidden sm:inline">Статус</span>
+            </button>
             <button onClick={() => setParsing(true)} className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300 transition-all cursor-pointer">
               <Zap className="w-3.5 h-3.5" />Парсить сейчас
             </button>
@@ -933,11 +1165,12 @@ export default function AdminPanel() {
                     <div className="px-5 py-10 text-center"><CheckCheck className="w-8 h-8 text-emerald-300 mx-auto mb-2" /><p className="text-[14px] text-gray-400">Все посты промодерированы</p></div>
                   ) : pendingPosts.map(post => (
                     <div key={post.id} className="px-5 py-3 flex items-center gap-3 hover:bg-gray-50/80 transition-colors">
-                      <div className="w-14 h-14 rounded-xl overflow-hidden bg-gray-100 shrink-0">
+                      <button type="button" onClick={() => openPhoto(post)} disabled={!post.image_url} aria-label="Открыть фото"
+                        className="block w-14 h-14 rounded-xl overflow-hidden bg-gray-100 shrink-0 cursor-zoom-in hover:ring-2 hover:ring-gray-300 transition disabled:cursor-default">
                         {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-5" />}
-                      </div>
+                      </button>
                       <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-medium text-gray-900 truncate">{post.title_ru}</p>
+                        <button type="button" onClick={() => setSelectedPost(post)} className="block max-w-full text-left text-[13px] font-medium text-gray-900 truncate hover:underline underline-offset-2 cursor-pointer">{post.title_ru}</button>
                         <p className="text-[12px] text-gray-400 mt-0.5">{fmtDateShort(post.post_date)}</p>
                       </div>
                       <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end pr-2">
@@ -1002,12 +1235,13 @@ export default function AdminPanel() {
                       <tr key={post.id} style={{ animationDelay: `${i * 25}ms` }} className={`row-in border-b border-gray-50 hover:bg-gray-50/80 transition-colors ${i % 2 ? 'bg-gray-50/30' : ''}`}>
                         <td className="px-4 py-3 text-[13px] font-mono text-gray-400">{post.id}</td>
                         <td className="px-4 py-3">
-                          <div className="w-16 h-16 rounded-xl overflow-hidden bg-gray-100">
+                          <button type="button" onClick={() => openPhoto(post)} disabled={!post.image_url} aria-label="Открыть фото"
+                            className="block w-16 h-16 rounded-xl overflow-hidden bg-gray-100 cursor-zoom-in hover:ring-2 hover:ring-gray-300 transition disabled:cursor-default">
                             {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-6" />}
-                          </div>
+                          </button>
                         </td>
                         <td className="px-4 py-3 max-w-[200px]">
-                          <p className="text-[14px] font-medium text-gray-900 line-clamp-2 leading-snug">{post.title_ru}</p>
+                          <button type="button" onClick={() => setSelectedPost(post)} className="text-left text-[14px] font-medium text-gray-900 line-clamp-2 leading-snug hover:underline underline-offset-2 cursor-pointer">{post.title_ru}</button>
                           <p className="text-[12px] text-gray-400 truncate mt-0.5">{post.category}</p>
                         </td>
                         <td className="px-4 py-3 text-[13px] text-gray-400 font-mono whitespace-nowrap">{fmtDateShort(post.post_date)}</td>
@@ -1047,11 +1281,12 @@ export default function AdminPanel() {
                   <p className="px-4 py-12 text-center text-[14px] text-gray-400">Посты не найдены</p>
                 ) : paginated.map(post => (
                   <div key={post.id} className="row-in px-4 py-3 flex gap-3">
-                    <div className="w-16 h-16 rounded-xl overflow-hidden bg-gray-100 shrink-0">
+                    <button type="button" onClick={() => openPhoto(post)} disabled={!post.image_url} aria-label="Открыть фото"
+                      className="block w-16 h-16 rounded-xl overflow-hidden bg-gray-100 shrink-0 cursor-zoom-in disabled:cursor-default">
                       {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-5 h-5 text-gray-400 m-auto mt-5" />}
-                    </div>
+                    </button>
                     <div className="flex-1 min-w-0">
-                      <p className="text-[14px] font-medium text-gray-900 leading-snug line-clamp-2">{post.title_ru}</p>
+                      <button type="button" onClick={() => setSelectedPost(post)} className="block text-left text-[14px] font-medium text-gray-900 leading-snug line-clamp-2 cursor-pointer">{post.title_ru}</button>
                       <div className="flex items-center gap-2 mt-1.5 flex-wrap"><StatusBadge status={post.telegram_status} /><StatusBadge status={post.website_status} /></div>
                       <div className="flex items-center gap-1.5 mt-2">
                         <button onClick={() => setSelectedPost(post)} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors cursor-pointer"><MoreHorizontal className="w-3.5 h-3.5" /></button>
@@ -1067,6 +1302,8 @@ export default function AdminPanel() {
             </div>
           )}
 
+          {activeTab === 'logs' && <LogsView />}
+
           {activeTab === 'settings' && (
             <div className="space-y-4 max-w-2xl">
               <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
@@ -1077,6 +1314,9 @@ export default function AdminPanel() {
                   {parseInfo?.queued > 0 && <p className="text-amber-600">В очереди на перевод: {parseInfo.queued}</p>}
                   {parseInfo?.last_error && <p className="text-red-600">{parseInfo.last_error}</p>}
                 </div>
+                <button onClick={() => setStatusOpen(true)} className="inline-flex items-center gap-2 px-4 py-2.5 mr-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-[13px] font-medium transition-all cursor-pointer">
+                  <Activity className="w-3.5 h-3.5" />Проверить состояние системы
+                </button>
                 <button onClick={() => setParsing(true)} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-[13px] font-medium transition-all cursor-pointer">
                   <Zap className="w-3.5 h-3.5" />Запустить парсинг вручную
                 </button>
