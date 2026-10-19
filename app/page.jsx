@@ -8,22 +8,70 @@ import {
   Clock, ExternalLink, ArrowUpRight,
   Menu, X, RefreshCw, ImageIcon, Globe, Send, Trash2,
   MoreHorizontal, FileText, CheckCheck, BanIcon, UserMinus,
-  User, Plus, Loader2, Zap, ImagePlus, Pencil, AlertTriangle
+  User, Plus, Loader2, Zap, ImagePlus, Pencil, AlertTriangle, LogOut
 } from 'lucide-react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'https://inst-parser.emu.web-perfomance.uz';
+// Все запросы идут на свой же origin: серверный прокси (app/api/backend) проверяет сессию
+// и добавляет токен бэкенда. Ни токена, ни адреса бэкенда в браузере нет.
+const API = '/api/backend';
+const PAGE_SIZE = 10;
 
 async function apiFetch(path, options = {}) {
+  const isForm = typeof FormData !== 'undefined' && options.body instanceof FormData;
   const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     cache: 'no-store',
     ...options,
+    headers: { ...(isForm ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) },
   });
+  if (res.status === 401) {
+    window.location.href = '/login';
+    throw new Error('Сессия истекла');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+    const detail = Array.isArray(err.detail) ? 'Некорректные данные' : err.detail;
+    throw new Error(detail || err.message || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+// Ссылка на пост на сайте: бэкенд отдаёт путь (/slug/) или полный URL
+function wpLink(link) {
+  if (!link) return '';
+  return /^https?:\/\//.test(link) ? link : `https://www.emuni.uz/blog${link}`;
+}
+
+// Сжатие перед загрузкой: JPEG до 1600px. Запрос идёт через Vercel (лимит тела ~4.5 МБ),
+// а оригиналы с телефона весят по 3–8 МБ.
+async function compressImage(file, maxSide = 1600, quality = 0.85) {
+  const bitmap = await createImageBitmap(file).catch(() => null);
+  if (!bitmap) throw new Error('Не удалось прочитать изображение');
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
+  if (!blob) throw new Error('Не удалось сжать изображение');
+  return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' });
+}
+
+// Картинка с ленивой загрузкой и плавным появлением (key={src} сбрасывает состояние при смене картинки)
+function ImgInner({ src, alt, className }) {
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <img src={src} alt={alt} loading="lazy" decoding="async"
+      ref={(el) => { if (el?.complete) setLoaded(true); }}
+      onLoad={() => setLoaded(true)} onError={() => setLoaded(true)}
+      className={`${className} transition-opacity duration-300 ${loaded ? 'opacity-100' : 'opacity-0'}`} />
+  );
+}
+function Img({ src, alt = '', className = '' }) {
+  return <ImgInner key={src} src={src} alt={alt} className={className} />;
 }
 
 function fmtDate(s) {
@@ -50,6 +98,11 @@ function StatusBadge({ status }) {
   if (status === 'declined') return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded-md bg-red-50 text-red-600 border border-red-100 whitespace-nowrap">
       <XCircle className="w-3 h-3" />Отклонено
+    </span>
+  );
+  if (status === 'publishing') return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded-md bg-blue-50 text-blue-600 border border-blue-100 whitespace-nowrap">
+      <Loader2 className="w-3 h-3 animate-spin" />Публикуется
     </span>
   );
   return (
@@ -114,17 +167,47 @@ function Tooltip({ text, children }) {
 
 // ─── Parse Overlay ────────────────────────────────────────────────────────────
 
+const RESULT_TEXT = {
+  nothing: 'Новых постов нет',
+  quota: 'OpenAI: закончились кредиты. Пополните баланс — перевод повторится автоматически.',
+};
+
 function ParseOverlay({ onDone }) {
   const [status, setStatus] = useState('running');
   const [msg, setMsg] = useState('Запрашиваем Instagram через Apify…');
+
   useEffect(() => {
-    const steps = [[0, 'Запрашиваем Instagram через Apify…'], [3000, 'Ищем новые посты…'], [7000, 'Переводим через OpenAI…'], [13000, 'Сохраняем и отправляем уведомления…']];
-    const timers = steps.map(([delay, text]) => setTimeout(() => setMsg(text), delay));
-    apiFetch('/api/parse-now', { method: 'POST' })
-      .then(() => { setStatus('done'); setMsg('Готово! Обновляем данные…'); setTimeout(onDone, 1200); })
-      .catch((e) => { setStatus('error'); setMsg('Ошибка: ' + e.message); setTimeout(onDone, 2500); });
-    return () => timers.forEach(clearTimeout);
+    let cancelled = false;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const finish = (st, text, delay) => { if (cancelled) return; setStatus(st); setMsg(text); setTimeout(onDone, delay); };
+
+    (async () => {
+      try {
+        const before = await apiFetch('/parse-status');
+        try { await apiFetch('/parse-now', { method: 'POST' }); }
+        catch (e) { if (!/уже выполняется/.test(e.message)) throw e; }   // уже идёт — просто ждём
+
+        const t0 = Date.now();
+        while (!cancelled && Date.now() - t0 < 5 * 60 * 1000) {
+          await sleep(2000);
+          const st = await apiFetch('/parse-status');
+          const elapsed = Date.now() - t0;
+          setMsg(elapsed < 8000 ? 'Ищем новые посты…' : elapsed < 20000 ? 'Переводим через OpenAI…' : 'Сохраняем и отправляем уведомления…');
+          if (!st.running && st.last_run && st.last_run !== before.last_run) {
+            if (st.last_result === 'ok') return finish('done', `Добавлено постов: ${st.last_created}`, 1500);
+            if (st.last_result === 'nothing') return finish('done', RESULT_TEXT.nothing, 1500);
+            if (st.last_result === 'quota') return finish('error', RESULT_TEXT.quota, 4500);
+            return finish('error', st.last_error || 'Ошибка парсинга', 3500);
+          }
+        }
+        finish('error', 'Парсинг идёт дольше обычного — проверьте позже', 3000);
+      } catch (e) {
+        finish('error', 'Ошибка: ' + e.message, 3000);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
+
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div className="bg-white rounded-2xl border border-gray-200 shadow-2xl p-8 w-full max-w-sm mx-4 text-center space-y-5">
@@ -134,7 +217,7 @@ function ParseOverlay({ onDone }) {
           {status === 'error' && <XCircle className="w-7 h-7 text-red-500" />}
         </div>
         <div>
-          <p className="text-[15px] font-semibold text-gray-900 mb-1">{status === 'running' ? 'Парсинг запущен' : status === 'done' ? 'Успешно!' : 'Ошибка'}</p>
+          <p className="text-[15px] font-semibold text-gray-900 mb-1">{status === 'running' ? 'Парсинг запущен' : status === 'done' ? 'Готово' : 'Ошибка'}</p>
           <p className="text-[13px] text-gray-500">{msg}</p>
         </div>
         {status === 'running' && <div className="w-full bg-gray-100 rounded-full h-1 overflow-hidden"><div className="h-full bg-gray-400 rounded-full animate-pulse" style={{ width: '60%' }} /></div>}
@@ -146,43 +229,40 @@ function ParseOverlay({ onDone }) {
 // ─── TG Photo Gallery ─────────────────────────────────────────────────────────
 
 const MAX_TG_PHOTOS = 4;
-const MAX_FILE_MB = 2;
+const MAX_FILE_MB = 15;   // размер исходника; перед отправкой фото сжимается до ~0.3–0.8 МБ
 
 function TgPhotoGallery({ originalUrl, photos, onChange }) {
   const inputRef = useRef(null);
   const [error, setError] = useState('');
 
-  const readFile = (file, onResult) => {
-    if (file.size > MAX_FILE_MB * 1024 * 1024) { setError(`Максимум ${MAX_FILE_MB} МБ.`); return; }
-    setError('');
-    const reader = new FileReader();
-    reader.onload = (ev) => onResult(ev.target.result);
-    reader.readAsDataURL(file);
+  const prepare = async (file) => {
+    if (file.size > MAX_FILE_MB * 1024 * 1024) { setError(`Исходный файл больше ${MAX_FILE_MB} МБ.`); return null; }
+    if (!file.type.startsWith('image/')) { setError('Нужен файл-изображение.'); return null; }
+    try { const small = await compressImage(file); setError(''); return small; }
+    catch (e) { setError(e.message); return null; }
   };
 
-  const handleAdd = (e) => {
+  const handleAdd = async (e) => {
     const file = e.target.files?.[0]; e.target.value = '';
     if (!file) return;
-    if (file.size > MAX_FILE_MB * 1024 * 1024) { setError(`Максимум ${MAX_FILE_MB} МБ.`); return; }
     if (photos.length >= MAX_TG_PHOTOS) { setError(`Максимум ${MAX_TG_PHOTOS} фото.`); return; }
-    setError('');
-    const url = URL.createObjectURL(file);
-    onChange([...photos, { id: Date.now(), url, file, isOriginal: false }]);
+    const small = await prepare(file);
+    if (!small) return;
+    onChange([...photos, { id: Date.now(), url: URL.createObjectURL(small), file: small, isOriginal: false }]);
   };
 
-  const handleReplace = (id, e) => {
+  const handleReplace = async (id, e) => {
     const file = e.target.files?.[0]; e.target.value = '';
     if (!file) return;
-    if (file.size > MAX_FILE_MB * 1024 * 1024) { setError(`Максимум ${MAX_FILE_MB} МБ.`); return; }
-    setError('');
-    const url = URL.createObjectURL(file);
-    onChange(photos.map(p => p.id === id ? { ...p, url, file, isOriginal: false } : p));
+    const small = await prepare(file);
+    if (!small) return;
+    onChange(photos.map(p => p.id === id ? { ...p, url: URL.createObjectURL(small), file: small, isOriginal: false } : p));
   };
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-[13px] text-gray-500">До {MAX_TG_PHOTOS} фото, лимит {MAX_FILE_MB} МБ каждое</p>
+        <p className="text-[13px] text-gray-500">До {MAX_TG_PHOTOS} фото, сжимаются автоматически</p>
         <span className="text-[12px] text-gray-400 font-medium">{photos.length}/{MAX_TG_PHOTOS}</span>
       </div>
       {error && <div className="flex items-center gap-2 bg-red-50 border border-red-100 text-red-600 px-3 py-2 rounded-lg text-[12px]"><XCircle className="w-3.5 h-3.5 shrink-0" />{error}</div>}
@@ -225,17 +305,21 @@ function SiteImageReplace({ originalUrl, siteUrl, onChange }) {
   const [error, setError] = useState('');
   const activeUrl = (typeof siteUrl === 'string' ? siteUrl : siteUrl?.url) || originalUrl;
 
-  const handleFile = (e) => {
+  const handleFile = async (e) => {
     const file = e.target.files?.[0]; e.target.value = '';
     if (!file) return;
-    if (file.size > MAX_FILE_MB * 1024 * 1024) { setError(`Максимум ${MAX_FILE_MB} МБ.`); return; }
-    setError('');
-    onChange({ url: URL.createObjectURL(file), file });
+    if (file.size > MAX_FILE_MB * 1024 * 1024) { setError(`Исходный файл больше ${MAX_FILE_MB} МБ.`); return; }
+    if (!file.type.startsWith('image/')) { setError('Нужен файл-изображение.'); return; }
+    try {
+      const small = await compressImage(file);
+      setError('');
+      onChange({ url: URL.createObjectURL(small), file: small });
+    } catch (err) { setError(err.message); }
   };
 
   return (
     <div className="space-y-3">
-      <p className="text-[13px] text-gray-500">Можно только <strong className="text-gray-700">заменить</strong> фото. Лимит: {MAX_FILE_MB} МБ.</p>
+      <p className="text-[13px] text-gray-500">Можно только <strong className="text-gray-700">заменить</strong> фото. Фото сжимается автоматически.</p>
       {error && <div className="flex items-center gap-2 bg-red-50 border border-red-100 text-red-600 px-3 py-2 rounded-lg text-[12px]"><XCircle className="w-3.5 h-3.5 shrink-0" />{error}</div>}
       <div className="relative group rounded-xl overflow-hidden bg-gray-100 aspect-video max-w-[50%]">
         {activeUrl ? <img src={activeUrl} alt="" className="w-full h-full object-cover" /> : <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-400"><ImageIcon className="w-8 h-8" /></div>}
@@ -275,6 +359,7 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
   const [acting, setActing] = useState(false);
   const [savingImages, setSavingImages] = useState(false);
   const [titlesExpanded, setTitlesExpanded] = useState(false);
+  const [modalError, setModalError] = useState('');
 
   const [tgPhotos, setTgPhotos] = useState([]);
   const [siteImage, setSiteImage] = useState(null);
@@ -302,31 +387,27 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
   const imagesDirty = hasNewTgFiles || hasNewSiteFile || tgWasReset || siteWasReset;
 
   const handleSaveImages = async () => {
+    setModalError('');
+    const newFiles = [...tgPhotos.map(p => p.file), siteImage?.file].filter(Boolean);
+    if (newFiles.reduce((sum, f) => sum + f.size, 0) > 3.8 * 1024 * 1024) {
+      setModalError('Слишком много новых фото за раз (больше ~4 МБ после сжатия). Сохраните часть, затем добавьте остальные.');
+      return;
+    }
     setSavingImages(true);
     try {
       const form = new FormData();
-
-      // По порядку: каждое фото — либо новый файл, либо существующий URL
+      // существующие фото передаём по URL, новые — файлами
       tgPhotos.slice(0, 4).forEach(p => {
-        if (p.file) {
-          form.append('tg_images', p.file);
-        } else if (p.url) {
-          form.append('tg_existing_urls', p.url);
-        }
+        if (p.file) form.append('tg_images', p.file);
+        else if (p.url) form.append('tg_existing_urls', p.url);
       });
+      if (siteImage?.file) form.append('site_image', siteImage.file);
+      if (siteWasReset) form.append('reset_site_image', 'true');
 
-      if (siteImage?.file) {
-        form.append('site_image', siteImage.file);
-      }
-
-      const res = await fetch(`${API}/api/posts/${post.id}/images`, {
-        method: 'POST',
-        body: form,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await apiFetch(`/posts/${post.id}/images`, { method: 'POST', body: form });
       await onRefresh();
     } catch (e) {
-      alert('Ошибка сохранения: ' + e.message);
+      setModalError('Ошибка сохранения: ' + e.message);
     } finally {
       setSavingImages(false);
     }
@@ -334,12 +415,14 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
 
   const doAction = async (channel, status) => {
     setActing(true);
+    setModalError('');
     try {
       await onAction(post.id, channel, status);
       setConfirmAction(null);
       onClose();
     } catch (e) {
-      alert('Ошибка: ' + e.message);
+      setConfirmAction(null);
+      setModalError('Ошибка: ' + e.message);
     } finally {
       setActing(false);
     }
@@ -469,6 +552,13 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
             </div>
           </div>
 
+          {modalError && (
+            <div role="alert" className="flex items-start gap-2 bg-red-50 border border-red-100 text-red-600 px-4 py-3 rounded-xl text-[13px]">
+              <XCircle className="w-4 h-4 shrink-0 mt-0.5" /><span className="flex-1">{modalError}</span>
+              <button onClick={() => setModalError('')} className="text-red-400 hover:text-red-600 cursor-pointer"><X className="w-3.5 h-3.5" /></button>
+            </div>
+          )}
+
           {/* Баннер несохранённых изменений */}
           {imagesDirty && (
             <div className="flex items-center gap-3 bg-amber-50 border border-amber-100 rounded-xl px-4 py-3">
@@ -490,7 +580,7 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
               <Instagram className="w-3.5 h-3.5" />Instagram
             </a>
             {post.wp_post_link && (
-              <a href={`https://www.emuni.uz/blog${post.wp_post_link}`} target="_blank" rel="noopener noreferrer"
+              <a href={wpLink(post.wp_post_link)} target="_blank" rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-[13px] font-medium text-blue-700 hover:bg-blue-100 transition-all cursor-pointer">
                 <ExternalLink className="w-3.5 h-3.5" />На сайте
               </a>
@@ -522,15 +612,46 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
   );
 }
 
+// ─── Skeletons ────────────────────────────────────────────────────────────────
+
+function SkeletonRow() {
+  return (
+    <tr className="border-b border-gray-50 animate-pulse">
+      <td className="px-4 py-3"><div className="h-3 w-6 bg-gray-100 rounded" /></td>
+      <td className="px-4 py-3"><div className="w-16 h-16 rounded-xl bg-gray-100" /></td>
+      <td className="px-4 py-3"><div className="h-3.5 w-40 bg-gray-100 rounded mb-2" /><div className="h-3 w-24 bg-gray-50 rounded" /></td>
+      <td className="px-4 py-3"><div className="h-3 w-20 bg-gray-100 rounded" /></td>
+      <td className="px-4 py-3"><div className="h-5 w-20 bg-gray-100 rounded-md" /></td>
+      <td className="px-4 py-3"><div className="h-5 w-20 bg-gray-100 rounded-md" /></td>
+      <td className="px-4 py-3"><div className="h-6 w-16 bg-gray-100 rounded-lg" /></td>
+      <td className="px-4 py-3"><div className="h-6 w-24 bg-gray-100 rounded-lg ml-auto" /></td>
+    </tr>
+  );
+}
+
+function SkeletonCard() {
+  return (
+    <div className="px-4 py-3 flex gap-3 animate-pulse">
+      <div className="w-16 h-16 rounded-xl bg-gray-100 shrink-0" />
+      <div className="flex-1 space-y-2"><div className="h-3.5 w-3/4 bg-gray-100 rounded" /><div className="h-5 w-28 bg-gray-100 rounded-md" /></div>
+    </div>
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function AdminPanel() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [posts, setPosts] = useState([]);
+  const [data, setData] = useState({ items: [], total: 0, total_pages: 1 });   // вкладка «Посты» (серверная пагинация)
+  const [pendingPosts, setPendingPosts] = useState([]);                         // блок «Ожидают модерации»
+  const [pendingLoaded, setPendingLoaded] = useState(false);
+  const [initialLoaded, setInitialLoaded] = useState(false);
   const [stats, setStats] = useState({ total: 0, telegram_pending: 0, website_pending: 0, website_approved: 0 });
   const [admins, setAdmins] = useState([]);
+  const [parseInfo, setParseInfo] = useState(null);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filterTg, setFilterTg] = useState('');
   const [filterWp, setFilterWp] = useState('');
   const [page, setPage] = useState(1);
@@ -543,8 +664,8 @@ export default function AdminPanel() {
   const [newAdminChatId, setNewAdminChatId] = useState('');
   const [error, setError] = useState('');
   const [parsing, setParsing] = useState(false);
-
-  const PAGE_SIZE = 5;
+  const reqId = useRef(0);
+  const listTopRef = useRef(null);
 
   const showToast = useCallback((msg, type = 'success') => {
     setToast({ msg, type });
@@ -552,43 +673,82 @@ export default function AdminPanel() {
   }, []);
 
   const loadStats = useCallback(async () => {
-    try { setStats(await apiFetch('/api/stats')); } catch (e) { console.error(e); }
+    try { setStats(await apiFetch('/stats')); } catch (e) { console.error(e); }
   }, []);
 
-  const loadPosts = useCallback(async () => {
-    setPostsLoading(true);
+  // silent=true — фоновое обновление: список не мигает и не показывает загрузку
+  const loadPosts = useCallback(async (silent = false) => {
+    const id = ++reqId.current;                      // ответы от устаревших запросов игнорируем
+    if (!silent) setPostsLoading(true);
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) });
       if (filterTg) params.set('tg_status', filterTg);
       if (filterWp) params.set('wp_status', filterWp);
-      if (search) params.set('search', search);
-      setPosts(await apiFetch(`/api/posts?${params}`));
+      if (debouncedSearch) params.set('search', debouncedSearch);
+      const res = await apiFetch(`/posts?${params}`);
+      if (id !== reqId.current) return;
+      if (res.page > res.total_pages) { setPage(res.total_pages); return; }   // страница опустела — шаг назад
+      setData(res);
+      setInitialLoaded(true);
       setError('');
-    } catch (e) { setError('Не удалось загрузить посты: ' + e.message); }
-    finally { setPostsLoading(false); }
-  }, [filterTg, filterWp, search]);
+    } catch (e) {
+      if (id === reqId.current) setError('Не удалось загрузить посты: ' + e.message);
+    } finally {
+      if (id === reqId.current) setPostsLoading(false);
+    }
+  }, [page, filterTg, filterWp, debouncedSearch]);
 
-  const loadAdmins = useCallback(async () => {
-    try { setAdmins(await apiFetch('/api/admins')); } catch (e) { console.error(e); }
+  const loadPending = useCallback(async () => {
+    try {
+      const res = await apiFetch('/posts?pending=true&page_size=5');
+      setPendingPosts(res.items);
+    } catch (e) { console.error(e); }
+    finally { setPendingLoaded(true); }
   }, []);
 
-  useEffect(() => { loadStats(); loadPosts(); loadAdmins(); }, []);
-  useEffect(() => { setPage(1); loadPosts(); }, [filterTg, filterWp, search]);
+  const loadAdmins = useCallback(async () => {
+    try { setAdmins(await apiFetch('/admins')); } catch (e) { console.error(e); }
+  }, []);
+
+  const loadParseInfo = useCallback(async () => {
+    try { setParseInfo(await apiFetch('/parse-status')); } catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => { loadStats(); loadPending(); loadAdmins(); }, [loadStats, loadPending, loadAdmins]);
+  useEffect(() => { loadPosts(); }, [loadPosts]);
+  useEffect(() => { if (activeTab === 'settings') loadParseInfo(); }, [activeTab, loadParseInfo]);
+
+  // поиск с задержкой, чтобы не слать запрос на каждую букву
   useEffect(() => {
-    const iv = setInterval(() => { loadStats(); loadPosts(); }, 30000);
+    const t = setTimeout(() => { setDebouncedSearch(prev => { if (prev !== search.trim()) setPage(1); return search.trim(); }); }, 350);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // фоновое обновление раз в 30 с, только пока вкладка браузера видима
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      loadStats(); loadPosts(true); loadPending();
+    }, 30000);
     return () => clearInterval(iv);
-  }, [loadStats, loadPosts]);
+  }, [loadStats, loadPosts, loadPending]);
+
+  const goToPage = (p) => {
+    setPage(p);
+    listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const changeFilter = (setter) => (e) => { setter(e.target.value); setPage(1); };
 
   const handleRefresh = async () => {
     setLoading(true);
-    try { await Promise.all([loadStats(), loadPosts(), loadAdmins()]); showToast('Данные обновлены'); }
+    try { await Promise.all([loadStats(), loadPosts(true), loadPending(), loadAdmins()]); showToast('Данные обновлены'); }
     finally { setLoading(false); }
   };
 
   const handleAction = async (postId, channel, status) => {
-    await apiFetch(`/api/posts/${postId}/action`, { method: 'POST', body: JSON.stringify({ channel, status }) });
+    await apiFetch(`/posts/${postId}/action`, { method: 'POST', body: JSON.stringify({ channel, status }) });
     showToast(status === 'approved' ? '✅ Опубликовано!' : '❌ Отклонено');
-    await Promise.all([loadPosts(), loadStats()]);
+    await Promise.all([loadPosts(true), loadPending(), loadStats()]);
   };
 
   const requestAction = (post, channel, status) => {
@@ -598,34 +758,41 @@ export default function AdminPanel() {
   const confirmActionDo = async () => {
     if (!actionConfirm) return;
     try { await handleAction(actionConfirm.postId, actionConfirm.channel, actionConfirm.status); }
-    catch (e) { showToast('Ошибка: ' + e.message, 'error'); }
+    catch (e) { showToast('Ошибка: ' + e.message, 'error'); await Promise.all([loadPosts(true), loadPending()]); }
     setActionConfirm(null);
   };
 
   const addAdmin = async () => {
     if (!newAdminName.trim() || !newAdminChatId.trim()) return;
     try {
-      await apiFetch('/api/admins', { method: 'POST', body: JSON.stringify({ name: newAdminName.trim(), chat_id: newAdminChatId.trim() }) });
+      await apiFetch('/admins', { method: 'POST', body: JSON.stringify({ name: newAdminName.trim(), chat_id: newAdminChatId.trim() }) });
       setNewAdminName(''); setNewAdminChatId('');
       showToast('Администратор добавлен'); loadAdmins();
     } catch (e) { showToast('Ошибка: ' + e.message, 'error'); }
   };
 
   const removeAdmin = async (id) => {
-    try { await apiFetch(`/api/admins/${id}`, { method: 'DELETE' }); showToast('Удалён'); loadAdmins(); }
+    try { await apiFetch(`/admins/${id}`, { method: 'DELETE' }); showToast('Удалён'); loadAdmins(); }
     catch (e) { showToast('Ошибка: ' + e.message, 'error'); }
   };
 
   const handleParseDone = async () => {
     setParsing(false);
-    await Promise.all([loadStats(), loadPosts()]);
-    showToast('Парсинг завершён');
+    await Promise.all([loadStats(), loadPosts(true), loadPending()]);
+    if (activeTab === 'settings') loadParseInfo();
   };
 
-  const totalPages = Math.max(1, Math.ceil(posts.length / PAGE_SIZE));
-  const paginated = posts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-  const syncedSelected = selectedPost ? posts.find(p => p.id === selectedPost.id) || selectedPost : null;
-  const pendingPosts = posts.filter(p => p.telegram_status === 'pending' || p.website_status === 'pending');
+  const logout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    window.location.href = '/login';
+  };
+
+  const totalPages = data.total_pages;
+  const paginated = data.items;
+  const syncedSelected = selectedPost
+    ? paginated.find(p => p.id === selectedPost.id) || pendingPosts.find(p => p.id === selectedPost.id) || selectedPost
+    : null;
+  const firstLoad = postsLoading && !initialLoaded;
 
   const tabs = [
     { id: 'dashboard', label: 'Обзор', icon: LayoutDashboard },
@@ -633,7 +800,7 @@ export default function AdminPanel() {
     { id: 'settings', label: 'Настройки', icon: Settings },
   ];
   const tabTitle = { dashboard: 'Обзор', posts: 'Посты', settings: 'Настройки' }[activeTab];
-  const tabSub = { dashboard: 'Общая статистика', posts: `${posts.length} записей`, settings: 'Конфигурация' }[activeTab];
+  const tabSub = { dashboard: 'Общая статистика', posts: `${data.total} записей`, settings: 'Конфигурация' }[activeTab];
 
   const SidebarNav = () => (
     <>
@@ -716,8 +883,11 @@ export default function AdminPanel() {
         <div className="px-3 py-3 border-t border-gray-100">
           <div className="px-2 py-1.5 rounded-lg bg-emerald-50 flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-            <span className="text-[11px] text-emerald-700 font-medium truncate">{API.replace('https://', '')}</span>
+            <span className="text-[11px] text-emerald-700 font-medium truncate">Сервер подключён</span>
           </div>
+          <button onClick={logout} className="mt-2 w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[13px] font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-800 transition-all cursor-pointer">
+            <LogOut className="w-4 h-4 text-gray-400" />Выйти
+          </button>
         </div>
       </div>
 
@@ -757,14 +927,14 @@ export default function AdminPanel() {
                   <button onClick={() => setActiveTab('posts')} className="text-[12px] text-gray-400 hover:text-gray-600 transition-colors cursor-pointer">Все посты →</button>
                 </div>
                 <div className="divide-y divide-gray-50">
-                  {postsLoading ? (
+                  {!pendingLoaded ? (
                     <div className="px-5 py-10 text-center"><Loader2 className="w-6 h-6 text-gray-300 mx-auto animate-spin" /></div>
                   ) : pendingPosts.length === 0 ? (
                     <div className="px-5 py-10 text-center"><CheckCheck className="w-8 h-8 text-emerald-300 mx-auto mb-2" /><p className="text-[14px] text-gray-400">Все посты промодерированы</p></div>
-                  ) : pendingPosts.slice(0, 5).map(post => (
+                  ) : pendingPosts.map(post => (
                     <div key={post.id} className="px-5 py-3 flex items-center gap-3 hover:bg-gray-50/80 transition-colors">
                       <div className="w-14 h-14 rounded-xl overflow-hidden bg-gray-100 shrink-0">
-                        {post.image_url ? <img src={post.image_url} alt="" className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-5" />}
+                        {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-5" />}
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-[13px] font-medium text-gray-900 truncate">{post.title_ru}</p>
@@ -789,7 +959,7 @@ export default function AdminPanel() {
           )}
 
           {activeTab === 'posts' && (
-            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div ref={listTopRef} className="bg-white rounded-xl border border-gray-200 overflow-hidden scroll-mt-20">
               <div className="px-4 sm:px-5 py-3 border-b border-gray-100 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <div className="relative flex-1 sm:max-w-xs">
                   <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -797,17 +967,18 @@ export default function AdminPanel() {
                     className="w-full pl-[30px] pr-3 py-2 text-[13px] border border-gray-200 rounded-lg bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-900/8 focus:border-gray-300 focus:bg-white transition-all" />
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <select value={filterTg} onChange={e => setFilterTg(e.target.value)} className="text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none transition-all cursor-pointer">
+                  <select value={filterTg} onChange={changeFilter(setFilterTg)} className="text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none transition-all cursor-pointer">
                     <option value="">Все (TG)</option><option value="pending">Ожидает</option><option value="approved">Одобрено</option><option value="declined">Отклонено</option>
                   </select>
-                  <select value={filterWp} onChange={e => setFilterWp(e.target.value)} className="text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none transition-all cursor-pointer">
+                  <select value={filterWp} onChange={changeFilter(setFilterWp)} className="text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none transition-all cursor-pointer">
                     <option value="">Все (Сайт)</option><option value="pending">Ожидает</option><option value="approved">Опубликовано</option><option value="declined">Отклонено</option>
                   </select>
-                  {(filterTg || filterWp || search) && <button onClick={() => { setFilterTg(''); setFilterWp(''); setSearch(''); }} className="p-2 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"><X className="w-3.5 h-3.5" /></button>}
+                  {(filterTg || filterWp || search) && <button onClick={() => { setFilterTg(''); setFilterWp(''); setSearch(''); setPage(1); }} className="p-2 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"><X className="w-3.5 h-3.5" /></button>}
                 </div>
               </div>
               {error && <div className="px-5 py-3 bg-red-50 border-b border-red-100 text-[13px] text-red-600 flex items-center gap-2"><XCircle className="w-4 h-4 shrink-0" />{error}</div>}
 
+              <div className={`transition-opacity duration-200 ${postsLoading && initialLoaded ? 'opacity-50 pointer-events-none' : 'opacity-100'}`} aria-busy={postsLoading}>
               <div className="hidden sm:block overflow-x-auto">
                 <table className="w-full">
                   <thead>
@@ -823,16 +994,16 @@ export default function AdminPanel() {
                     </tr>
                   </thead>
                   <tbody>
-                    {postsLoading ? (
-                      <tr><td colSpan={8} className="px-5 py-12 text-center"><Loader2 className="w-6 h-6 text-gray-300 mx-auto animate-spin" /></td></tr>
+                    {firstLoad ? (
+                      Array.from({ length: PAGE_SIZE }).map((_, i) => <SkeletonRow key={i} />)
                     ) : paginated.length === 0 ? (
                       <tr><td colSpan={8} className="px-5 py-12 text-center text-[14px] text-gray-400">Посты не найдены</td></tr>
                     ) : paginated.map((post, i) => (
-                      <tr key={post.id} className={`border-b border-gray-50 hover:bg-gray-50/80 transition-colors ${i % 2 ? 'bg-gray-50/30' : ''}`}>
+                      <tr key={post.id} style={{ animationDelay: `${i * 25}ms` }} className={`row-in border-b border-gray-50 hover:bg-gray-50/80 transition-colors ${i % 2 ? 'bg-gray-50/30' : ''}`}>
                         <td className="px-4 py-3 text-[13px] font-mono text-gray-400">{post.id}</td>
                         <td className="px-4 py-3">
                           <div className="w-16 h-16 rounded-xl overflow-hidden bg-gray-100">
-                            {post.image_url ? <img src={post.image_url} alt="" className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-6" />}
+                            {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-6" />}
                           </div>
                         </td>
                         <td className="px-4 py-3 max-w-[200px]">
@@ -844,7 +1015,7 @@ export default function AdminPanel() {
                         <td className="px-4 py-3"><StatusBadge status={post.website_status} /></td>
                         <td className="px-4 py-3">
                           {post.wp_post_link
-                            ? <a href={`https://www.emuni.uz/blog${post.wp_post_link}`} target="_blank" rel="noopener noreferrer"
+                            ? <a href={wpLink(post.wp_post_link)} target="_blank" rel="noopener noreferrer"
                               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-blue-100 bg-blue-50 text-[12px] font-medium text-blue-600 hover:bg-blue-100 transition-colors whitespace-nowrap cursor-pointer">
                               <ExternalLink className="w-3 h-3" />Открыть
                             </a>
@@ -870,14 +1041,14 @@ export default function AdminPanel() {
               </div>
 
               <div className="sm:hidden divide-y divide-gray-100">
-                {postsLoading ? (
-                  <div className="py-12 text-center"><Loader2 className="w-6 h-6 text-gray-300 mx-auto animate-spin" /></div>
+                {firstLoad ? (
+                  Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)
                 ) : paginated.length === 0 ? (
                   <p className="px-4 py-12 text-center text-[14px] text-gray-400">Посты не найдены</p>
                 ) : paginated.map(post => (
-                  <div key={post.id} className="px-4 py-3 flex gap-3">
+                  <div key={post.id} className="row-in px-4 py-3 flex gap-3">
                     <div className="w-16 h-16 rounded-xl overflow-hidden bg-gray-100 shrink-0">
-                      {post.image_url ? <img src={post.image_url} alt="" className="w-full h-full object-cover" /> : <ImageIcon className="w-5 h-5 text-gray-400 m-auto mt-5" />}
+                      {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-5 h-5 text-gray-400 m-auto mt-5" />}
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-[14px] font-medium text-gray-900 leading-snug line-clamp-2">{post.title_ru}</p>
@@ -891,15 +1062,21 @@ export default function AdminPanel() {
                   </div>
                 ))}
               </div>
-              {totalPages > 1 && <Pagination currentPage={page} totalPages={totalPages} total={posts.length} onPageChange={setPage} />}
+              </div>
+              {totalPages > 1 && <Pagination currentPage={page} totalPages={totalPages} total={data.total} onPageChange={goToPage} />}
             </div>
           )}
 
           {activeTab === 'settings' && (
             <div className="space-y-4 max-w-2xl">
               <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
-                <h3 className="text-[15px] font-semibold text-gray-900">API сервер</h3>
-                <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 font-mono text-[13px] text-gray-700 select-all break-all">{API}</div>
+                <h3 className="text-[15px] font-semibold text-gray-900">Парсер</h3>
+                <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 text-[13px] text-gray-600 space-y-1">
+                  <p>Последний запуск: <span className="font-medium text-gray-800">{parseInfo?.last_run ? fmtDate(parseInfo.last_run) : '—'}</span></p>
+                  <p>Результат: <span className="font-medium text-gray-800">{{ ok: 'новые посты добавлены', nothing: 'новых постов нет', quota: 'нет кредитов OpenAI', error: 'ошибка' }[parseInfo?.last_result] || '—'}</span></p>
+                  {parseInfo?.queued > 0 && <p className="text-amber-600">В очереди на перевод: {parseInfo.queued}</p>}
+                  {parseInfo?.last_error && <p className="text-red-600">{parseInfo.last_error}</p>}
+                </div>
                 <button onClick={() => setParsing(true)} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-[13px] font-medium transition-all cursor-pointer">
                   <Zap className="w-3.5 h-3.5" />Запустить парсинг вручную
                 </button>
