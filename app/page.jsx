@@ -200,7 +200,7 @@ function Lightbox({ images, index, onClose }) {
 
 const RESULT_TEXT = {
   nothing: 'Новых постов нет',
-  quota: 'OpenAI: закончились кредиты. Пополните баланс — парсинг продолжится автоматически.',
+  quota: 'OpenAI: закончились бабки, надо пополнить(',
 };
 
 function ParseOverlay({ onDone }) {
@@ -283,9 +283,9 @@ function ParseOverlay({ onDone }) {
 // ─── Проверка состояния системы ──────────────────────────────────────────────
 
 const HEALTH_STYLE = {
-  ok:    { icon: CheckCircle2, wrap: 'bg-emerald-50 text-emerald-600', label: 'В порядке' },
-  warn:  { icon: AlertTriangle, wrap: 'bg-amber-50 text-amber-600',   label: 'Внимание' },
-  error: { icon: XCircle,       wrap: 'bg-red-50 text-red-600',       label: 'Проблема' },
+  ok: { icon: CheckCircle2, wrap: 'bg-emerald-50 text-emerald-600', label: 'В порядке' },
+  warn: { icon: AlertTriangle, wrap: 'bg-amber-50 text-amber-600', label: 'Внимание' },
+  error: { icon: XCircle, wrap: 'bg-red-50 text-red-600', label: 'Проблема' },
 };
 
 function StatusModal({ onClose, onResult }) {
@@ -433,7 +433,7 @@ function LogsView() {
         className="bg-gray-950 text-[12px] leading-relaxed font-mono p-4 h-[65vh] overflow-auto">
         {!available ? <p className="text-gray-400">Файл логов недоступен на сервере.</p>
           : lines.length === 0 ? <p className="text-gray-500">{loading ? 'Загрузка…' : 'Записей нет'}</p>
-          : lines.map((l, i) => <div key={i} className={`whitespace-pre-wrap break-words ${LEVEL_COLOR[l.level] || 'text-gray-300'}`}>{l.text}</div>)}
+            : lines.map((l, i) => <div key={i} className={`whitespace-pre-wrap break-words ${LEVEL_COLOR[l.level] || 'text-gray-300'}`}>{l.text}</div>)}
       </div>
     </div>
   );
@@ -1005,7 +1005,7 @@ export default function AdminPanel() {
   };
 
   const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => { });
     window.location.href = '/login';
   };
 
@@ -1211,91 +1211,91 @@ export default function AdminPanel() {
               {error && <div className="px-5 py-3 bg-red-50 border-b border-red-100 text-[13px] text-red-600 flex items-center gap-2"><XCircle className="w-4 h-4 shrink-0" />{error}</div>}
 
               <div className={`transition-opacity duration-200 ${postsLoading && initialLoaded ? 'opacity-50 pointer-events-none' : 'opacity-100'}`} aria-busy={postsLoading}>
-              <div className="hidden sm:block overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-gray-100 bg-gray-50/60">
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-10">#</th>
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-20">Фото</th>
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide">Заголовок</th>
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Дата</th>
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Telegram</th>
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Сайт</th>
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Ссылка</th>
-                      <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-32">Действия</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {firstLoad ? (
-                      Array.from({ length: PAGE_SIZE }).map((_, i) => <SkeletonRow key={i} />)
-                    ) : paginated.length === 0 ? (
-                      <tr><td colSpan={8} className="px-5 py-12 text-center text-[14px] text-gray-400">Посты не найдены</td></tr>
-                    ) : paginated.map((post, i) => (
-                      <tr key={post.id} style={{ animationDelay: `${i * 25}ms` }} className={`row-in border-b border-gray-50 hover:bg-gray-50/80 transition-colors ${i % 2 ? 'bg-gray-50/30' : ''}`}>
-                        <td className="px-4 py-3 text-[13px] font-mono text-gray-400">{post.id}</td>
-                        <td className="px-4 py-3">
-                          <button type="button" onClick={() => openPhoto(post)} disabled={!post.image_url} aria-label="Открыть фото"
-                            className="block w-16 h-16 rounded-xl overflow-hidden bg-gray-100 cursor-zoom-in hover:ring-2 hover:ring-gray-300 transition disabled:cursor-default">
-                            {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-6" />}
-                          </button>
-                        </td>
-                        <td className="px-4 py-3 max-w-[200px]">
-                          <button type="button" onClick={() => setSelectedPost(post)} className="text-left text-[14px] font-medium text-gray-900 line-clamp-2 leading-snug hover:underline underline-offset-2 cursor-pointer">{post.title_ru}</button>
-                          <p className="text-[12px] text-gray-400 truncate mt-0.5">{post.category}</p>
-                        </td>
-                        <td className="px-4 py-3 text-[13px] text-gray-400 font-mono whitespace-nowrap">{fmtDateShort(post.post_date)}</td>
-                        <td className="px-4 py-3"><StatusBadge status={post.telegram_status} /></td>
-                        <td className="px-4 py-3"><StatusBadge status={post.website_status} /></td>
-                        <td className="px-4 py-3">
-                          {post.wp_post_link
-                            ? <a href={wpLink(post.wp_post_link)} target="_blank" rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-blue-100 bg-blue-50 text-[12px] font-medium text-blue-600 hover:bg-blue-100 transition-colors whitespace-nowrap cursor-pointer">
-                              <ExternalLink className="w-3 h-3" />Открыть
-                            </a>
-                            : <span className="text-[13px] text-gray-300">—</span>}
-                        </td>
-                        <td className="px-4 py-3 pr-8">
-                          <div className="flex items-center gap-1 justify-end flex-nowrap">
-                            {post.telegram_status === 'pending' && (<>
-                              <Tooltip text="Опубл. TG"><button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-600 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button></Tooltip>
-                              <Tooltip text="Откл. TG"><button onClick={() => requestAction(post, 'telegram', 'declined')} className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition-colors cursor-pointer"><XCircle className="w-3.5 h-3.5" /></button></Tooltip>
-                            </>)}
-                            {post.website_status === 'pending' && (<>
-                              <Tooltip text="Опубл. сайт"><button onClick={() => requestAction(post, 'website', 'approved')} className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-600 transition-colors cursor-pointer"><Globe className="w-3.5 h-3.5" /></button></Tooltip>
-                              <Tooltip text="Откл. сайт"><button onClick={() => requestAction(post, 'website', 'declined')} className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition-colors cursor-pointer"><BanIcon className="w-3.5 h-3.5" /></button></Tooltip>
-                            </>)}
-                            <Tooltip text="Подробнее"><button onClick={() => setSelectedPost(post)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"><MoreHorizontal className="w-3.5 h-3.5" /></button></Tooltip>
-                          </div>
-                        </td>
+                <div className="hidden sm:block overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b border-gray-100 bg-gray-50/60">
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-10">#</th>
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-20">Фото</th>
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide">Заголовок</th>
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Дата</th>
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Telegram</th>
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Сайт</th>
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Ссылка</th>
+                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-32">Действия</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {firstLoad ? (
+                        Array.from({ length: PAGE_SIZE }).map((_, i) => <SkeletonRow key={i} />)
+                      ) : paginated.length === 0 ? (
+                        <tr><td colSpan={8} className="px-5 py-12 text-center text-[14px] text-gray-400">Посты не найдены</td></tr>
+                      ) : paginated.map((post, i) => (
+                        <tr key={post.id} style={{ animationDelay: `${i * 25}ms` }} className={`row-in border-b border-gray-50 hover:bg-gray-50/80 transition-colors ${i % 2 ? 'bg-gray-50/30' : ''}`}>
+                          <td className="px-4 py-3 text-[13px] font-mono text-gray-400">{post.id}</td>
+                          <td className="px-4 py-3">
+                            <button type="button" onClick={() => openPhoto(post)} disabled={!post.image_url} aria-label="Открыть фото"
+                              className="block w-16 h-16 rounded-xl overflow-hidden bg-gray-100 cursor-zoom-in hover:ring-2 hover:ring-gray-300 transition disabled:cursor-default">
+                              {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-4 h-4 text-gray-400 m-auto mt-6" />}
+                            </button>
+                          </td>
+                          <td className="px-4 py-3 max-w-[200px]">
+                            <button type="button" onClick={() => setSelectedPost(post)} className="text-left text-[14px] font-medium text-gray-900 line-clamp-2 leading-snug hover:underline underline-offset-2 cursor-pointer">{post.title_ru}</button>
+                            <p className="text-[12px] text-gray-400 truncate mt-0.5">{post.category}</p>
+                          </td>
+                          <td className="px-4 py-3 text-[13px] text-gray-400 font-mono whitespace-nowrap">{fmtDateShort(post.post_date)}</td>
+                          <td className="px-4 py-3"><StatusBadge status={post.telegram_status} /></td>
+                          <td className="px-4 py-3"><StatusBadge status={post.website_status} /></td>
+                          <td className="px-4 py-3">
+                            {post.wp_post_link
+                              ? <a href={wpLink(post.wp_post_link)} target="_blank" rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-blue-100 bg-blue-50 text-[12px] font-medium text-blue-600 hover:bg-blue-100 transition-colors whitespace-nowrap cursor-pointer">
+                                <ExternalLink className="w-3 h-3" />Открыть
+                              </a>
+                              : <span className="text-[13px] text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 pr-8">
+                            <div className="flex items-center gap-1 justify-end flex-nowrap">
+                              {post.telegram_status === 'pending' && (<>
+                                <Tooltip text="Опубл. TG"><button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-600 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button></Tooltip>
+                                <Tooltip text="Откл. TG"><button onClick={() => requestAction(post, 'telegram', 'declined')} className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition-colors cursor-pointer"><XCircle className="w-3.5 h-3.5" /></button></Tooltip>
+                              </>)}
+                              {post.website_status === 'pending' && (<>
+                                <Tooltip text="Опубл. сайт"><button onClick={() => requestAction(post, 'website', 'approved')} className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-600 transition-colors cursor-pointer"><Globe className="w-3.5 h-3.5" /></button></Tooltip>
+                                <Tooltip text="Откл. сайт"><button onClick={() => requestAction(post, 'website', 'declined')} className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition-colors cursor-pointer"><BanIcon className="w-3.5 h-3.5" /></button></Tooltip>
+                              </>)}
+                              <Tooltip text="Подробнее"><button onClick={() => setSelectedPost(post)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"><MoreHorizontal className="w-3.5 h-3.5" /></button></Tooltip>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
 
-              <div className="sm:hidden divide-y divide-gray-100">
-                {firstLoad ? (
-                  Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)
-                ) : paginated.length === 0 ? (
-                  <p className="px-4 py-12 text-center text-[14px] text-gray-400">Посты не найдены</p>
-                ) : paginated.map(post => (
-                  <div key={post.id} className="row-in px-4 py-3 flex gap-3">
-                    <button type="button" onClick={() => openPhoto(post)} disabled={!post.image_url} aria-label="Открыть фото"
-                      className="block w-16 h-16 rounded-xl overflow-hidden bg-gray-100 shrink-0 cursor-zoom-in disabled:cursor-default">
-                      {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-5 h-5 text-gray-400 m-auto mt-5" />}
-                    </button>
-                    <div className="flex-1 min-w-0">
-                      <button type="button" onClick={() => setSelectedPost(post)} className="block text-left text-[14px] font-medium text-gray-900 leading-snug line-clamp-2 cursor-pointer">{post.title_ru}</button>
-                      <div className="flex items-center gap-2 mt-1.5 flex-wrap"><StatusBadge status={post.telegram_status} /><StatusBadge status={post.website_status} /></div>
-                      <div className="flex items-center gap-1.5 mt-2">
-                        <button onClick={() => setSelectedPost(post)} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors cursor-pointer"><MoreHorizontal className="w-3.5 h-3.5" /></button>
-                        {post.telegram_status === 'pending' && <button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button>}
-                        {post.website_status === 'pending' && <button onClick={() => requestAction(post, 'website', 'approved')} className="p-1.5 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors cursor-pointer"><Globe className="w-3.5 h-3.5" /></button>}
+                <div className="sm:hidden divide-y divide-gray-100">
+                  {firstLoad ? (
+                    Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)
+                  ) : paginated.length === 0 ? (
+                    <p className="px-4 py-12 text-center text-[14px] text-gray-400">Посты не найдены</p>
+                  ) : paginated.map(post => (
+                    <div key={post.id} className="row-in px-4 py-3 flex gap-3">
+                      <button type="button" onClick={() => openPhoto(post)} disabled={!post.image_url} aria-label="Открыть фото"
+                        className="block w-16 h-16 rounded-xl overflow-hidden bg-gray-100 shrink-0 cursor-zoom-in disabled:cursor-default">
+                        {post.image_url ? <Img src={post.image_url} className="w-full h-full object-cover" /> : <ImageIcon className="w-5 h-5 text-gray-400 m-auto mt-5" />}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <button type="button" onClick={() => setSelectedPost(post)} className="block text-left text-[14px] font-medium text-gray-900 leading-snug line-clamp-2 cursor-pointer">{post.title_ru}</button>
+                        <div className="flex items-center gap-2 mt-1.5 flex-wrap"><StatusBadge status={post.telegram_status} /><StatusBadge status={post.website_status} /></div>
+                        <div className="flex items-center gap-1.5 mt-2">
+                          <button onClick={() => setSelectedPost(post)} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors cursor-pointer"><MoreHorizontal className="w-3.5 h-3.5" /></button>
+                          {post.telegram_status === 'pending' && <button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button>}
+                          {post.website_status === 'pending' && <button onClick={() => requestAction(post, 'website', 'approved')} className="p-1.5 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors cursor-pointer"><Globe className="w-3.5 h-3.5" /></button>}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
               </div>
               {totalPages > 1 && <Pagination currentPage={page} totalPages={totalPages} total={data.total} onPageChange={goToPage} />}
             </div>
