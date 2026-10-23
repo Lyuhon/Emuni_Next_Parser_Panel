@@ -22,6 +22,7 @@ export async function proxy(req: NextRequest) {
 }
 
 export const config = {
-  // всё, кроме статики Next и favicon
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  // всё, кроме статики Next и картинок (логотип нужен на странице входа, до авторизации).
+  // API-маршрутов с расширением файла нет, так что закрытые данные под это исключение не попадают.
+  matcher: ['/((?!_next/static|_next/image|.*\\.(?:png|jpg|jpeg|gif|svg|ico|webp)$).*)'],
 };
