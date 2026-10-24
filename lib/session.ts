@@ -4,6 +4,7 @@ import { SignJWT, jwtVerify } from 'jose';
 const isProd = process.env.NODE_ENV === 'production';
 // В проде префикс __Host- запрещает перезапись cookie с поддоменов
 export const SESSION_COOKIE = isProd ? '__Host-emu_session' : 'emu_session';
+export type Role = 'admin' | 'site_admin';
 export const SESSION_TTL_SEC = 12 * 60 * 60;
 
 function key(): Uint8Array {
@@ -12,19 +13,22 @@ function key(): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-export async function createSession(username: string): Promise<string> {
-  return new SignJWT({ sub: username })
+export async function createSession(username: string, role: Role): Promise<string> {
+  return new SignJWT({ sub: username, role })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(`${SESSION_TTL_SEC}s`)
     .sign(key());
 }
 
-export async function verifySession(token?: string): Promise<{ username: string } | null> {
+export async function verifySession(token?: string): Promise<{ username: string; role: Role } | null> {
   if (!token) return null;
   try {
     const { payload } = await jwtVerify(token, key(), { algorithms: ['HS256'] });
-    return payload.sub ? { username: String(payload.sub) } : null;
+    if (!payload.sub) return null;
+    // сессии, выданные до появления ролей, принадлежали единственному админу
+    const role: Role = payload.role === 'site_admin' ? 'site_admin' : 'admin';
+    return { username: String(payload.sub), role };
   } catch {
     return null;
   }

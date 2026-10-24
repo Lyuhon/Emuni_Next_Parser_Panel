@@ -35,6 +35,17 @@ async function apiFetch(path, options = {}) {
   return res.json();
 }
 
+// «Сегодня» в формате YYYY-MM-DD по локальному времени браузера (для выбора даты публикации)
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function fmtDay(s) {
+  if (!s) return '—';
+  const [y, m, d] = s.split('-');
+  return `${d}.${m}.${y}`;
+}
+
 // Ссылка на пост на сайте: бэкенд отдаёт путь (/slug/) или полный URL
 function wpLink(link) {
   if (!link) return '';
@@ -565,9 +576,11 @@ function SiteImageReplace({ originalUrl, siteUrl, onChange }) {
 
 // ─── Post Modal ───────────────────────────────────────────────────────────────
 
-function PostModal({ post, onClose, onAction, onRefresh }) {
+function PostModal({ post, role, onClose, onAction, onRefresh }) {
+  const isSite = role === 'site_admin';          // site_admin: только сайт
   const [confirmAction, setConfirmAction] = useState(null);
-  const [activeImageTab, setActiveImageTab] = useState('tg');
+  const [pubDate, setPubDate] = useState(todayStr);
+  const [activeImageTab, setActiveImageTab] = useState(isSite ? 'site' : 'tg');
   const [activeContentTab, setActiveContentTab] = useState('site');
   const [acting, setActing] = useState(false);
   const [savingImages, setSavingImages] = useState(false);
@@ -610,10 +623,14 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
     try {
       const form = new FormData();
       // существующие фото передаём по URL, новые — файлами
-      tgPhotos.slice(0, 4).forEach(p => {
-        if (p.file) form.append('tg_images', p.file);
-        else if (p.url) form.append('tg_existing_urls', p.url);
-      });
+      if (isSite) {
+        form.append('keep_tg', 'true');            // site_admin меняет только фото сайта, альбом Telegram не трогаем
+      } else {
+        tgPhotos.slice(0, 4).forEach(p => {
+          if (p.file) form.append('tg_images', p.file);
+          else if (p.url) form.append('tg_existing_urls', p.url);
+        });
+      }
       if (siteImage?.file) form.append('site_image', siteImage.file);
       if (siteWasReset) form.append('reset_site_image', 'true');
 
@@ -630,7 +647,7 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
     setActing(true);
     setModalError('');
     try {
-      await onAction(post.id, channel, status);
+      await onAction(post.id, channel, status, channel === 'website' && status === 'approved' ? (pubDate || todayStr()) : undefined);
       setConfirmAction(null);
       onClose();
     } catch (e) {
@@ -665,6 +682,9 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
               </div>
             </div>
             <p className="text-[13px] text-gray-600 line-clamp-2">«{post.title_ru}»</p>
+            {confirmAction.channel === 'website' && confirmAction.status === 'approved' && (
+              <p className="text-[13px] text-gray-500">Дата на сайте: <span className="font-medium text-gray-800">{fmtDay(pubDate || todayStr())}</span>{(pubDate || todayStr()) > todayStr() ? ' — пост будет отложен до этого дня' : ''}</p>
+            )}
             <div className="flex gap-2">
               <button onClick={() => setConfirmAction(null)} disabled={acting}
                 className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 text-[13px] font-medium text-gray-600 hover:bg-gray-50 transition-all cursor-pointer disabled:opacity-40">Отмена</button>
@@ -690,7 +710,7 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
           {/* Контент */}
           <div className="border border-gray-100 rounded-xl overflow-hidden">
             <div className="flex border-b border-gray-100 bg-gray-50/60">
-              {[{ key: 'site', label: 'Сайт', icon: Globe }, { key: 'tg', label: 'Telegram', icon: Send }].map(({ key, label, icon: Icon }) => (
+              {[{ key: 'site', label: 'Сайт', icon: Globe }, { key: 'tg', label: 'Telegram', icon: Send }].filter(t => !isSite || t.key === 'site').map(({ key, label, icon: Icon }) => (
                 <button key={key} onClick={() => setActiveContentTab(key)}
                   className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-[13px] font-medium transition-all border-b-2 cursor-pointer ${activeContentTab === key ? 'border-gray-900 text-gray-900 bg-white' : 'border-transparent text-gray-400 hover:text-gray-600 hover:bg-gray-50'}`}>
                   <Icon className="w-3.5 h-3.5" />{label}
@@ -741,8 +761,10 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
 
           {/* Статусы */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="space-y-1"><p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Telegram</p><StatusBadge status={post.telegram_status} /></div>
-            <div className="space-y-1"><p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Сайт</p><StatusBadge status={post.website_status} /></div>
+            {!isSite && <div className="space-y-1"><p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Telegram</p><StatusBadge status={post.telegram_status} /></div>}
+            <div className="space-y-1"><p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Сайт</p><StatusBadge status={post.website_status} />
+              {post.site_publish_date && post.website_status === 'approved' && <p className="text-[12px] text-gray-500">на сайте с {fmtDay(post.site_publish_date)}{post.site_publish_date > todayStr() ? ' (отложено)' : ''}</p>}
+            </div>
             <div><p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Дата поста</p><p className="text-[13px] text-gray-600 font-mono">{fmtDate(post.post_date)}</p></div>
             <div><p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Получен</p><p className="text-[13px] text-gray-600 font-mono">{fmtDate(post.received_at)}</p></div>
           </div>
@@ -750,7 +772,7 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
           {/* Фото */}
           <div className="border border-gray-200 rounded-xl overflow-hidden">
             <div className="flex border-b border-gray-100">
-              {[{ key: 'tg', label: 'Telegram (до 4 фото)', icon: Send }, { key: 'site', label: 'Сайт (заменить)', icon: Globe }].map(({ key, label, icon: Icon }) => (
+              {[{ key: 'tg', label: 'Telegram (до 4 фото)', icon: Send }, { key: 'site', label: 'Сайт (заменить)', icon: Globe }].filter(t => !isSite || t.key === 'site').map(({ key, label, icon: Icon }) => (
                 <button key={key} onClick={() => setActiveImageTab(key)}
                   className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-[13px] font-medium transition-all border-b-2 cursor-pointer ${activeImageTab === key ? 'border-gray-900 text-gray-900 bg-gray-50' : 'border-transparent text-gray-400 hover:text-gray-600 hover:bg-gray-50'}`}>
                   <Icon className="w-3.5 h-3.5" />{label}
@@ -787,6 +809,16 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
 
         {/* Футер */}
         <div className="px-6 py-4 border-t border-gray-100">
+          {post.website_status === 'pending' && (
+            <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[13px]">
+              <label htmlFor="pubdate" className="font-medium text-gray-600">Дата на сайте</label>
+              <input id="pubdate" type="date" value={pubDate} onChange={e => setPubDate(e.target.value)}
+                className="px-2.5 py-1.5 border border-gray-200 rounded-lg bg-gray-50 text-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-300 cursor-pointer" />
+              {pubDate && pubDate !== todayStr() && <button type="button" onClick={() => setPubDate(todayStr())} className="text-gray-400 hover:text-gray-600 underline underline-offset-2 cursor-pointer">Сегодня</button>}
+              {pubDate > todayStr() && <span className="text-blue-600">Отложенная публикация</span>}
+              {pubDate && pubDate < todayStr() && <span className="text-amber-600">Пост выйдет с прошлой датой</span>}
+            </div>
+          )}
           <div className="flex flex-wrap gap-2">
             <a href={post.post_url} target="_blank" rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 text-[13px] font-medium text-gray-600 hover:bg-gray-50 transition-all cursor-pointer">
@@ -798,7 +830,7 @@ function PostModal({ post, onClose, onAction, onRefresh }) {
                 <ExternalLink className="w-3.5 h-3.5" />На сайте
               </a>
             )}
-            {post.telegram_status === 'pending' && (<>
+            {!isSite && post.telegram_status === 'pending' && (<>
               <button onClick={() => setConfirmAction({ channel: 'telegram', status: 'approved' })}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-[13px] font-medium text-emerald-700 hover:bg-emerald-100 transition-all cursor-pointer">
                 <Send className="w-3.5 h-3.5" />Опубл. в TG
@@ -876,6 +908,8 @@ export default function AdminPanel() {
   const [newAdminName, setNewAdminName] = useState('');
   const [newAdminChatId, setNewAdminChatId] = useState('');
   const [error, setError] = useState('');
+  const [role, setRole] = useState(null);          // 'admin' | 'site_admin' (узнаём с сервера)
+  const isSite = role === 'site_admin';
   const [parsing, setParsing] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [statusOpen, setStatusOpen] = useState(false);
@@ -916,11 +950,11 @@ export default function AdminPanel() {
 
   const loadPending = useCallback(async () => {
     try {
-      const res = await apiFetch('/posts?pending=true&page_size=5');
+      const res = await apiFetch(isSite ? '/posts?wp_status=pending&page_size=5' : '/posts?pending=true&page_size=5');
       setPendingPosts(res.items);
     } catch (e) { console.error(e); }
     finally { setPendingLoaded(true); }
-  }, []);
+  }, [isSite]);
 
   const loadAdmins = useCallback(async () => {
     try { setAdmins(await apiFetch('/admins')); } catch (e) { console.error(e); }
@@ -930,8 +964,15 @@ export default function AdminPanel() {
     try { setParseInfo(await apiFetch('/parse-status')); } catch (e) { console.error(e); }
   }, []);
 
-  useEffect(() => { loadStats(); loadPending(); loadAdmins(); }, [loadStats, loadPending, loadAdmins]);
-  useEffect(() => { loadPosts(); }, [loadPosts]);
+  useEffect(() => {
+    fetch('/api/auth/me', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => setRole(d.role))
+      .catch(() => { window.location.href = '/login'; });
+  }, []);
+  useEffect(() => { if (role) { loadStats(); loadPending(); } }, [role, loadStats, loadPending]);
+  useEffect(() => { if (role === 'admin') loadAdmins(); }, [role, loadAdmins]);
+  useEffect(() => { if (role) loadPosts(); }, [role, loadPosts]);
   useEffect(() => { if (activeTab === 'settings') loadParseInfo(); }, [activeTab, loadParseInfo]);
 
   // поиск с задержкой, чтобы не слать запрос на каждую букву
@@ -963,12 +1004,12 @@ export default function AdminPanel() {
 
   const handleRefresh = async () => {
     setLoading(true);
-    try { await Promise.all([loadStats(), loadPosts(true), loadPending(), loadAdmins()]); showToast('Данные обновлены'); }
+    try { await Promise.all([loadStats(), loadPosts(true), loadPending(), isSite ? null : loadAdmins()]); showToast('Данные обновлены'); }
     finally { setLoading(false); }
   };
 
-  const handleAction = async (postId, channel, status) => {
-    await apiFetch(`/posts/${postId}/action`, { method: 'POST', body: JSON.stringify({ channel, status }) });
+  const handleAction = async (postId, channel, status, publishDate) => {
+    await apiFetch(`/posts/${postId}/action`, { method: 'POST', body: JSON.stringify({ channel, status, ...(publishDate ? { publish_date: publishDate } : {}) }) });
     showToast(status === 'approved' ? '✅ Опубликовано!' : '❌ Отклонено');
     await Promise.all([loadPosts(true), loadPending(), loadStats()]);
   };
@@ -1016,12 +1057,14 @@ export default function AdminPanel() {
     : null;
   const firstLoad = postsLoading && !initialLoaded;
 
-  const tabs = [
+  const allTabs = [
     { id: 'dashboard', label: 'Обзор', icon: LayoutDashboard },
     { id: 'posts', label: 'Посты', icon: Instagram },
     { id: 'logs', label: 'Логи', icon: ScrollText },
     { id: 'settings', label: 'Настройки', icon: Settings },
   ];
+  const tabs = isSite ? allTabs.filter(t => t.id === 'dashboard' || t.id === 'posts') : allTabs;
+  const pendingBadge = isSite ? stats.website_pending : stats.telegram_pending + stats.website_pending;
   const tabTitle = { dashboard: 'Обзор', posts: 'Посты', logs: 'Логи', settings: 'Настройки' }[activeTab];
   const tabSub = { dashboard: 'Общая статистика', posts: `${data.total} записей`, logs: 'Что происходит на сервере', settings: 'Конфигурация' }[activeTab];
 
@@ -1033,13 +1076,17 @@ export default function AdminPanel() {
           className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[14px] font-medium transition-all cursor-pointer ${activeTab === tab.id ? 'bg-gray-100 text-gray-900' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-800'}`}>
           <tab.icon className={`w-4 h-4 shrink-0 ${activeTab === tab.id ? 'text-gray-700' : 'text-gray-400'}`} />
           {tab.label}
-          {tab.id === 'posts' && (stats.telegram_pending + stats.website_pending) > 0 && (
-            <span className="ml-auto text-[10px] font-bold bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded-full">{stats.telegram_pending + stats.website_pending}</span>
+          {tab.id === 'posts' && pendingBadge > 0 && (
+            <span className="ml-auto text-[10px] font-bold bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded-full">{pendingBadge}</span>
           )}
         </button>
       ))}
     </>
   );
+
+  if (!role) {
+    return <div className="min-h-screen bg-[#FAFAFA] flex items-center justify-center"><Loader2 className="w-6 h-6 text-gray-300 animate-spin" /></div>;
+  }
 
   return (
     <div className="min-h-screen bg-[#FAFAFA]" style={{ fontFamily: "'Geist', 'Inter', system-ui, sans-serif" }}>
@@ -1076,6 +1123,7 @@ export default function AdminPanel() {
       <PostModal
         key={syncedSelected?.id ?? 'none'}
         post={syncedSelected}
+        role={role}
         onClose={() => setSelectedPost(null)}
         onAction={handleAction}
         onRefresh={loadPosts}
@@ -1126,6 +1174,7 @@ export default function AdminPanel() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {!isSite && (<>
             <button onClick={() => setStatusOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300 transition-all cursor-pointer" aria-label="Проверить состояние системы">
               <span className="relative"><Activity className="w-3.5 h-3.5" />
                 {health && <span className={`absolute -top-1 -right-1 w-2 h-2 rounded-full ring-2 ring-white ${health === 'ok' ? 'bg-emerald-500' : health === 'warn' ? 'bg-amber-500' : 'bg-red-500'}`} />}
@@ -1135,6 +1184,7 @@ export default function AdminPanel() {
             <button onClick={() => setParsing(true)} className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300 transition-all cursor-pointer">
               <Zap className="w-3.5 h-3.5" />Парсить сейчас
             </button>
+            </>)}
             <button onClick={handleRefresh} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium rounded-lg border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300 disabled:opacity-40 transition-all cursor-pointer">
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span className="hidden sm:inline">Обновить</span>
@@ -1147,7 +1197,9 @@ export default function AdminPanel() {
             <div className="space-y-4">
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
                 <StatCard title="Всего постов" value={stats.total} icon={FileText} accent="bg-gray-100" />
-                <StatCard title="Ожидают (TG)" value={stats.telegram_pending} icon={Clock} accent="bg-amber-50" sub="Ждут модерации" />
+                {isSite
+                  ? <StatCard title="Отклонено (Сайт)" value={stats.website_declined} icon={XCircle} accent="bg-red-50" sub="Не опубликованы" />
+                  : <StatCard title="Ожидают (TG)" value={stats.telegram_pending} icon={Clock} accent="bg-amber-50" sub="Ждут модерации" />}
                 <StatCard title="Ожидают (Сайт)" value={stats.website_pending} icon={Globe} accent="bg-violet-50" sub="Ждут публикации" />
                 <StatCard title="Опубликовано" value={stats.website_approved} icon={CheckCircle2} accent="bg-emerald-50"
                   sub={stats.total > 0 ? `${Math.round(stats.website_approved / stats.total * 100)}% от всех` : '—'} />
@@ -1173,7 +1225,7 @@ export default function AdminPanel() {
                         <p className="text-[12px] text-gray-400 mt-0.5">{fmtDateShort(post.post_date)}</p>
                       </div>
                       <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end pr-2">
-                        {post.telegram_status === 'pending' && (<>
+                        {!isSite && post.telegram_status === 'pending' && (<>
                           <Tooltip text="Опубл. TG"><button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-600 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button></Tooltip>
                           <Tooltip text="Откл. TG"><button onClick={() => requestAction(post, 'telegram', 'declined')} className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition-colors cursor-pointer"><XCircle className="w-3.5 h-3.5" /></button></Tooltip>
                         </>)}
@@ -1199,9 +1251,9 @@ export default function AdminPanel() {
                     className="w-full pl-[30px] pr-3 py-2 text-[13px] border border-gray-200 rounded-lg bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-900/8 focus:border-gray-300 focus:bg-white transition-all" />
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <select value={filterTg} onChange={changeFilter(setFilterTg)} className="text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none transition-all cursor-pointer">
+                  {!isSite && <select value={filterTg} onChange={changeFilter(setFilterTg)} className="text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none transition-all cursor-pointer">
                     <option value="">Все (TG)</option><option value="pending">Ожидает</option><option value="approved">Одобрено</option><option value="declined">Отклонено</option>
-                  </select>
+                  </select>}
                   <select value={filterWp} onChange={changeFilter(setFilterWp)} className="text-[13px] border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-700 focus:outline-none transition-all cursor-pointer">
                     <option value="">Все (Сайт)</option><option value="pending">Ожидает</option><option value="approved">Опубликовано</option><option value="declined">Отклонено</option>
                   </select>
@@ -1219,7 +1271,7 @@ export default function AdminPanel() {
                         <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-20">Фото</th>
                         <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide">Заголовок</th>
                         <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Дата</th>
-                        <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Telegram</th>
+                        {!isSite && <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Telegram</th>}
                         <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Сайт</th>
                         <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-28">Ссылка</th>
                         <th className="px-4 py-2.5 text-left text-[12px] font-semibold text-gray-500 uppercase tracking-wide w-32">Действия</th>
@@ -1229,7 +1281,7 @@ export default function AdminPanel() {
                       {firstLoad ? (
                         Array.from({ length: PAGE_SIZE }).map((_, i) => <SkeletonRow key={i} />)
                       ) : paginated.length === 0 ? (
-                        <tr><td colSpan={8} className="px-5 py-12 text-center text-[14px] text-gray-400">Посты не найдены</td></tr>
+                        <tr><td colSpan={isSite ? 7 : 8} className="px-5 py-12 text-center text-[14px] text-gray-400">Посты не найдены</td></tr>
                       ) : paginated.map((post, i) => (
                         <tr key={post.id} style={{ animationDelay: `${i * 25}ms` }} className={`row-in border-b border-gray-50 hover:bg-gray-50/80 transition-colors ${i % 2 ? 'bg-gray-50/30' : ''}`}>
                           <td className="px-4 py-3 text-[13px] font-mono text-gray-400">{post.id}</td>
@@ -1244,7 +1296,7 @@ export default function AdminPanel() {
                             <p className="text-[12px] text-gray-400 truncate mt-0.5">{post.category}</p>
                           </td>
                           <td className="px-4 py-3 text-[13px] text-gray-400 font-mono whitespace-nowrap">{fmtDateShort(post.post_date)}</td>
-                          <td className="px-4 py-3"><StatusBadge status={post.telegram_status} /></td>
+                          {!isSite && <td className="px-4 py-3"><StatusBadge status={post.telegram_status} /></td>}
                           <td className="px-4 py-3"><StatusBadge status={post.website_status} /></td>
                           <td className="px-4 py-3">
                             {post.wp_post_link
@@ -1256,7 +1308,7 @@ export default function AdminPanel() {
                           </td>
                           <td className="px-4 py-3 pr-8">
                             <div className="flex items-center gap-1 justify-end flex-nowrap">
-                              {post.telegram_status === 'pending' && (<>
+                              {!isSite && post.telegram_status === 'pending' && (<>
                                 <Tooltip text="Опубл. TG"><button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-600 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button></Tooltip>
                                 <Tooltip text="Откл. TG"><button onClick={() => requestAction(post, 'telegram', 'declined')} className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition-colors cursor-pointer"><XCircle className="w-3.5 h-3.5" /></button></Tooltip>
                               </>)}
@@ -1286,10 +1338,10 @@ export default function AdminPanel() {
                       </button>
                       <div className="flex-1 min-w-0">
                         <button type="button" onClick={() => setSelectedPost(post)} className="block text-left text-[14px] font-medium text-gray-900 leading-snug line-clamp-2 cursor-pointer">{post.title_ru}</button>
-                        <div className="flex items-center gap-2 mt-1.5 flex-wrap"><StatusBadge status={post.telegram_status} /><StatusBadge status={post.website_status} /></div>
+                        <div className="flex items-center gap-2 mt-1.5 flex-wrap">{!isSite && <StatusBadge status={post.telegram_status} />}<StatusBadge status={post.website_status} /></div>
                         <div className="flex items-center gap-1.5 mt-2">
                           <button onClick={() => setSelectedPost(post)} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors cursor-pointer"><MoreHorizontal className="w-3.5 h-3.5" /></button>
-                          {post.telegram_status === 'pending' && <button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button>}
+                          {!isSite && post.telegram_status === 'pending' && <button onClick={() => requestAction(post, 'telegram', 'approved')} className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors cursor-pointer"><Send className="w-3.5 h-3.5" /></button>}
                           {post.website_status === 'pending' && <button onClick={() => requestAction(post, 'website', 'approved')} className="p-1.5 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors cursor-pointer"><Globe className="w-3.5 h-3.5" /></button>}
                         </div>
                       </div>

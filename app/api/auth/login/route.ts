@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { cookieOptions, createSession, sameOrigin, SESSION_COOKIE } from '@/lib/session';
+import { cookieOptions, createSession, sameOrigin, SESSION_COOKIE, type Role } from '@/lib/session';
 import { safeEqual, verifyPassword } from '@/lib/password';
 
 export const runtime = 'nodejs';
@@ -35,9 +35,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export async function POST(req: Request) {
   if (!sameOrigin(req)) return NextResponse.json({ detail: 'Forbidden' }, { status: 403 });
 
-  const expectedUser = process.env.ADMIN_USERNAME;
-  const expectedHash = process.env.ADMIN_PASSWORD_HASH;
-  if (!expectedUser || !expectedHash || (process.env.SESSION_SECRET || '').length < 32) {
+  // Две учётные записи: admin (всё) и необязательная site_admin (только обзор, посты, публикация на сайт)
+  const accounts: { user: string; hash: string; role: Role }[] = [];
+  if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD_HASH) {
+    accounts.push({ user: process.env.ADMIN_USERNAME, hash: process.env.ADMIN_PASSWORD_HASH, role: 'admin' });
+  }
+  if (process.env.SITE_ADMIN_USERNAME && process.env.SITE_ADMIN_PASSWORD_HASH
+      && process.env.SITE_ADMIN_USERNAME !== process.env.ADMIN_USERNAME) {   // одинаковые логины не допускаем
+    accounts.push({ user: process.env.SITE_ADMIN_USERNAME, hash: process.env.SITE_ADMIN_PASSWORD_HASH, role: 'site_admin' });
+  }
+  if (accounts.length === 0 || (process.env.SESSION_SECRET || '').length < 32) {
     return NextResponse.json({ detail: 'Авторизация не настроена на сервере' }, { status: 500 });
   }
 
@@ -51,18 +58,22 @@ export async function POST(req: Request) {
   const username = typeof body.username === 'string' ? body.username.slice(0, 100) : '';
   const password = typeof body.password === 'string' ? body.password.slice(0, 200) : '';
 
-  // оба сравнения выполняются всегда — время ответа не выдаёт, что именно неверно
-  const userOk = safeEqual(username, expectedUser);
-  const passOk = verifyPassword(password, expectedHash);
+  // все сравнения выполняются всегда — время ответа не выдаёт, что именно неверно
+  let matched: Role | null = null;
+  for (const a of accounts) {
+    const userOk = safeEqual(username, a.user);
+    const passOk = verifyPassword(password, a.hash);
+    if (userOk && passOk) matched = a.role;
+  }
 
-  if (!(userOk && passOk)) {
+  if (!matched) {
     registerFail(ip);
     await sleep(600);
     return NextResponse.json({ detail: 'Неверный логин или пароль' }, { status: 401 });
   }
 
   fails.delete(ip);
-  const res = NextResponse.json({ ok: true });
-  res.cookies.set(SESSION_COOKIE, await createSession(username), cookieOptions);
+  const res = NextResponse.json({ ok: true, role: matched });
+  res.cookies.set(SESSION_COOKIE, await createSession(username, matched), cookieOptions);
   return res;
 }
